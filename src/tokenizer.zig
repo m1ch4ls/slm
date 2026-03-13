@@ -89,3 +89,73 @@ pub fn formatChat(
     if (needs_free) allocator.free(user_message);
     return truncated;
 }
+
+test "TokenBudget.availableForStdin - basic calculation" {
+    const budget = TokenBudget{
+        .system_tokens = 100,
+        .user_prompt_tokens = 50,
+        .stdin_tokens = 0,
+        .output_tokens = 500,
+        .overhead_tokens = 50,
+        .context_size = 4096,
+    };
+
+    const available = budget.availableForStdin();
+    try std.testing.expectEqual(@as(i64, 3396), available);
+}
+
+test "TokenBudget.availableForStdin - exactly full" {
+    const budget = TokenBudget{
+        .system_tokens = 1000,
+        .user_prompt_tokens = 1000,
+        .stdin_tokens = 0,
+        .output_tokens = 1000,
+        .overhead_tokens = 50,
+        .context_size = 4050,
+    };
+
+    const available = budget.availableForStdin();
+    try std.testing.expectEqual(@as(i64, 1000), available);
+}
+
+test "TokenBudget.availableForStdin - over budget" {
+    const budget = TokenBudget{
+        .system_tokens = 2000,
+        .user_prompt_tokens = 2000,
+        .stdin_tokens = 0,
+        .output_tokens = 2000,
+        .overhead_tokens = 100,
+        .context_size = 4096,
+    };
+
+    const available = budget.availableForStdin();
+    try std.testing.expectEqual(@as(i64, -2004), available);
+}
+
+test "TokenBudget.availableForStdin - shows usage after stdin allocated" {
+    const budget = TokenBudget{
+        .system_tokens = 100,
+        .user_prompt_tokens = 50,
+        .stdin_tokens = 500,
+        .output_tokens = 500,
+        .overhead_tokens = 50,
+        .context_size = 4096,
+    };
+
+    const available = budget.availableForStdin();
+    try std.testing.expectEqual(@as(i64, 3396), available);
+}
+
+test "TokenBudget.availableForStdin - small context" {
+    const budget = TokenBudget{
+        .system_tokens = 50,
+        .user_prompt_tokens = 25,
+        .stdin_tokens = 0,
+        .output_tokens = 25,
+        .overhead_tokens = 10,
+        .context_size = 512,
+    };
+
+    const available = budget.availableForStdin();
+    try std.testing.expectEqual(@as(i64, 402), available);
+}

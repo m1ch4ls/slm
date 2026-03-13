@@ -92,4 +92,15 @@ pub fn build(b: *std.Build) void {
 
     const run_protocol_test = b.addRunArtifact(protocol_test);
     test_step.dependOn(&run_protocol_test.step);
+
+    const tokenizer_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tokenizer.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_tokenizer_test = b.addRunArtifact(tokenizer_test);
+    test_step.dependOn(&run_tokenizer_test.step);
 }
