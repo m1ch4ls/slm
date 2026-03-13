@@ -1,0 +1,7 @@
+.zig-cache/
+zig-out/
+*.gguf
+llama.cpp/
+models/
+.idea/
+main
