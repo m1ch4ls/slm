@@ -64,12 +64,14 @@ fn readLengthPrefixedFile(file: std.fs.File, allocator: std.mem.Allocator, len: 
     if (len == 0) return try allocator.dupe(u8, "");
 
     const result = try allocator.alloc(u8, len);
-    errdefer allocator.free(result);
 
     var remaining: usize = len;
     var offset: usize = 0;
     while (remaining > 0) {
-        const n = try file.read(result[offset..]);
+        const n = file.read(result[offset..]) catch |err| {
+            allocator.free(result);
+            return err;
+        };
         if (n == 0) {
             allocator.free(result);
             return error.EndOfStream;

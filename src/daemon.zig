@@ -1,6 +1,7 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const llama = @import("llama_api.zig");
+const think_filter = @import("think_filter.zig");
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -23,7 +24,7 @@ pub fn setupSignalHandlers() void {
     posix.sigaction(posix.SIG.INT, &sa, null);
 }
 
-pub const Config = struct {
+const Config = struct {
     model_path: []const u8,
     context_size: u32,
     n_threads: u32,
@@ -307,21 +308,34 @@ pub const Daemon = struct {
         const sampler = llama.llama_sampler_init_greedy();
         defer llama.llama_sampler_free(sampler);
 
+        var filter = try think_filter.ThinkFilter.init(self.allocator);
+        defer filter.deinit();
+
         var generated_tokens: u32 = 0;
         var pos: i32 = @intCast(tokens.len);
 
         while (generated_tokens < request.max_tokens) : (generated_tokens += 1) {
             const new_token = llama.llama_sampler_sample(sampler, self.ctx.ctx, -1);
 
+            log.debug("Sampled token: {d}", .{new_token});
+
             if (new_token == llama.TokenNull or llama.llama_vocab_is_eog(self.model.vocab, new_token)) {
-                log.debug("EOS token detected, stopping", .{});
+                log.debug("EOS token detected (token={d}), stopping", .{new_token});
                 break;
             }
 
             const token_text = try llama.detokenize(self.allocator, self.model.vocab, new_token);
             defer self.allocator.free(token_text);
 
-            try protocol.writeToken(file, token_text);
+            var output = try think_filter.OutputBuffer.init(self.allocator);
+            defer output.deinit();
+
+            try filter.process(token_text, &output);
+
+            // Write each chunk as a separate token
+            for (output.chunks.items) |chunk| {
+                try protocol.writeToken(file, chunk);
+            }
 
             var new_batch = llama.llama_batch_init(1, 0, 1);
             defer llama.llama_batch_free(new_batch);
@@ -337,6 +351,16 @@ pub const Daemon = struct {
 
             _ = llama.llama_decode(self.ctx.ctx, new_batch);
             pos += 1;
+        }
+
+        var final_output = try think_filter.OutputBuffer.init(self.allocator);
+        defer final_output.deinit();
+
+        try filter.flush(&final_output);
+
+        // Write remaining chunks
+        for (final_output.chunks.items) |chunk| {
+            try protocol.writeToken(file, chunk);
         }
 
         try protocol.writeEndMarker(file);

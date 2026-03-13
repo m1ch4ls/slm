@@ -203,6 +203,49 @@ pub fn detokenize(
     return result;
 }
 
+/// Preprocesses a chat template to hardcode enable_thinking=false
+/// This replaces Jinja conditionals that check enable_thinking with the false branch
+pub fn preprocessChatTemplate(allocator: std.mem.Allocator, template: []const u8) ![:0]const u8 {
+    // Qwen3.5 template pattern: if enable_thinking is defined and enable_thinking is false
+    // We replace this with just the false case output: '<think>\n\n</think>\n\n'
+    const false_pattern = "{{- '<think>\\n\\n</think>\\n\\n' }}";
+    
+    // Simple replacement for Qwen3.5 style template
+    // Look for the pattern and replace the conditional with the false output
+    if (std.mem.indexOf(u8, template, "enable_thinking")) |start_idx| {
+        // Find the start of the if block
+        var if_start: usize = start_idx;
+        while (if_start > 0) {
+            if_start -= 1;
+            if (std.mem.startsWith(u8, template[if_start..], "{%- if")) {
+                break;
+            }
+            if (if_start == 0) break;
+        }
+        
+        // Find the end of the endif block
+        const endif_pattern = "{%- endif %}";
+        if (std.mem.indexOf(u8, template[start_idx..], endif_pattern)) |endif_rel| {
+            const endif_end = start_idx + endif_rel + endif_pattern.len;
+            
+            // Build new template with replacement (null-terminated)
+            const new_len = if_start + false_pattern.len + (template.len - endif_end);
+            const new_template = try allocator.alloc(u8, new_len + 1);
+            
+            // Copy parts: before if + replacement + after endif
+            @memcpy(new_template[0..if_start], template[0..if_start]);
+            @memcpy(new_template[if_start..if_start + false_pattern.len], false_pattern);
+            @memcpy(new_template[if_start + false_pattern.len..new_len], template[endif_end..]);
+            new_template[new_len] = 0; // null terminator
+            
+            return new_template[0..new_len :0];
+        }
+    }
+    
+    // No modification needed, return null-terminated copy of original
+    return try allocator.dupeZ(u8, template);
+}
+
 pub const ModelHandle = struct {
     model: *Model,
     vocab: *Vocab,
@@ -245,11 +288,18 @@ pub const ModelHandle = struct {
         allocator: std.mem.Allocator,
         messages: []const ChatMessage,
         add_assistant: bool,
-    ) ![:0]const u8 {
+    ) ![]const u8 {
         const tmpl = llama_model_chat_template(self.model, null);
 
+        // Preprocess template to disable thinking
+        const tmpl_str = if (tmpl) |t| std.mem.span(t) else "";
+        const processed_tmpl = try preprocessChatTemplate(allocator, tmpl_str);
+        defer if (tmpl != null) allocator.free(processed_tmpl);
+
+        const tmpl_to_use = if (tmpl != null) processed_tmpl.ptr else null;
+
         const max_len: usize = @intCast(llama_chat_apply_template(
-            if (tmpl) |t| t else null,
+            tmpl_to_use,
             messages.ptr,
             messages.len,
             add_assistant,
@@ -259,11 +309,11 @@ pub const ModelHandle = struct {
 
         if (max_len < 0) return error.ChatTemplateFailed;
 
-        const buf = try allocator.allocSentinel(u8, max_len, 0);
+        const buf = try allocator.alloc(u8, @intCast(max_len));
         errdefer allocator.free(buf);
 
         const result = llama_chat_apply_template(
-            if (tmpl) |t| t else null,
+            tmpl_to_use,
             messages.ptr,
             messages.len,
             add_assistant,
@@ -276,7 +326,8 @@ pub const ModelHandle = struct {
             return error.ChatTemplateFailed;
         }
 
-        return buf[0..@as(usize, @intCast(result)) :0];
+        const result_slice = buf[0..@as(usize, @intCast(result))];
+        return result_slice;
     }
 };
 
