@@ -34,7 +34,10 @@ const DaemonClient = struct {
         @memcpy(addr.path[0..max_path], self.socket_path[0..max_path]);
         addr.path[max_path] = 0;
 
-        while (true) {
+        var retries: usize = 0;
+        const max_retries: usize = 10;
+
+        while (retries < max_retries) : (retries += 1) {
             const sock = std.posix.socket(
                 std.posix.AF.UNIX,
                 std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC,
@@ -49,7 +52,7 @@ const DaemonClient = struct {
                 std.posix.close(sock);
 
                 if (err == error.ConnectionRefused or err == error.FileNotFound) {
-                    log.info("Daemon not running, starting...", .{});
+                    log.info("Daemon not running, starting... (attempt {d}/{d})", .{ retries + 1, max_retries });
                     try self.spawnDaemon();
                     std.Thread.sleep(100 * std.time.ns_per_ms);
                     continue;
@@ -61,6 +64,8 @@ const DaemonClient = struct {
             self.socket = sock;
             return;
         }
+
+        return error.DaemonFailedToStart;
     }
 
     fn spawnDaemon(self: *DaemonClient) !void {
@@ -131,7 +136,7 @@ pub fn main() !void {
     const request = protocol.Request{
         .prompt = user_prompt,
         .stdin = stdin_content,
-        .max_tokens = 256,
+        .max_tokens = 10240,
     };
 
     try client.sendRequest(request);

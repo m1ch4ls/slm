@@ -85,6 +85,7 @@ pub fn formatChat(
     }
     defer if (needs_free) allocator.free(user_message);
 
-    _ = available;
-    return try allocator.dupe(u8, user_message);
+    const truncated = try truncateForTokenBudget(allocator, vocab, user_message, available);
+    if (needs_free) allocator.free(user_message);
+    return truncated;
 }

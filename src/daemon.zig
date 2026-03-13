@@ -1,8 +1,27 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const llama = @import("llama_api.zig");
+const posix = std.posix;
+const linux = std.os.linux;
 
 const log = std.log.scoped(.daemon);
+
+var shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+fn signalHandler(sig: c_int) callconv(.c) void {
+    _ = sig;
+    shutdown_requested.store(true, .monotonic);
+}
+
+pub fn setupSignalHandlers() void {
+    var sa: posix.Sigaction = .{
+        .handler = .{ .handler = signalHandler },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.TERM, &sa, null);
+    posix.sigaction(posix.SIG.INT, &sa, null);
+}
 
 pub const Config = struct {
     model_path: []const u8,
@@ -81,16 +100,6 @@ pub const Daemon = struct {
         const model_params = llama.llama_model_default_params();
         log.info("Model params: n_gpu_layers={}, use_mmap={}", .{ model_params.n_gpu_layers, model_params.use_mmap });
 
-        var ctx_params = llama.llama_context_default_params();
-        ctx_params.n_ctx = config.context_size;
-        ctx_params.n_batch = 512;
-        ctx_params.n_ubatch = 512;
-        ctx_params.n_seq_max = 1;
-        ctx_params.n_threads = @intCast(config.n_threads);
-        ctx_params.n_threads_batch = @intCast(config.n_threads);
-
-        log.info("Context params: n_ctx={}, n_threads={}", .{ ctx_params.n_ctx, ctx_params.n_threads });
-
         var model = try llama.ModelHandle.load(allocator, config.model_path, model_params);
         errdefer model.deinit();
 
@@ -154,7 +163,7 @@ pub const Daemon = struct {
         log.info("Creating Unix socket", .{});
         const socket = try std.posix.socket(
             std.posix.AF.UNIX,
-            std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC,
+            std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC | std.posix.SOCK.NONBLOCK,
             0,
         );
         defer std.posix.close(socket);
@@ -178,7 +187,15 @@ pub const Daemon = struct {
 
         log.info("Daemon listening on {s}", .{self.socket_path});
 
-        while (true) {
+        while (!shutdown_requested.load(.monotonic)) {
+            var pollfd: [1]posix.pollfd = .{.{ .fd = socket, .events = posix.POLL.IN, .revents = 0 }};
+            const poll_result = posix.poll(&pollfd, 100) catch |err| {
+                log.err("Poll failed: {}", .{err});
+                continue;
+            };
+
+            if (poll_result == 0) continue;
+
             log.debug("Waiting for connection...", .{});
 
             var client_addr: std.posix.sockaddr.un = undefined;
@@ -189,6 +206,7 @@ pub const Daemon = struct {
                 &client_addr_len,
                 0,
             ) catch |err| {
+                if (err == error.WouldBlock) continue;
                 log.err("Accept failed: {}", .{err});
                 continue;
             };
@@ -199,6 +217,9 @@ pub const Daemon = struct {
             };
             std.posix.close(client_socket);
         }
+
+        log.info("Shutting down daemon", .{});
+        std.posix.unlink(socket_path_z) catch {};
     }
 
     fn handleClient(self: *Daemon, client_socket: std.posix.fd_t) !void {
@@ -330,11 +351,10 @@ pub fn main() !void {
     llama.llama_backend_init();
     defer llama.llama_backend_free();
 
-    const config = try readConfig(allocator);
-    defer {
-        var c = config;
-        c.deinit();
-    }
+    setupSignalHandlers();
+
+    var config = try readConfig(allocator);
+    defer config.deinit();
 
     var daemon = try Daemon.init(allocator, config);
     defer daemon.deinit();
