@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
     // via ggml_backend_load_all_from_path() based on availability
 
     daemon.root_module.link_libc = true;
-    
+
     // Set rpath so the binary can find libraries in the same directory
     // $ORIGIN is a special ELF value meaning "directory where the binary is located"
     daemon.root_module.addRPath(.{ .cwd_relative = "$ORIGIN/../lib" });
@@ -75,6 +75,49 @@ pub fn build(b: *std.Build) void {
 
     const daemon_step = b.step("daemon", "Run the SLM daemon");
     daemon_step.dependOn(&run_daemon.step);
+
+    // Benchmark executable
+    const benchmark_mod = b.createModule(.{
+        .root_source_file = b.path("src/benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = optimize != .Debug,
+    });
+
+    const benchmark = b.addExecutable(.{
+        .name = "slm-benchmark",
+        .root_module = benchmark_mod,
+    });
+
+    if (optimize == .ReleaseFast or optimize == .ReleaseSmall) {
+        benchmark.want_lto = false;
+    }
+
+    benchmark.root_module.addIncludePath(llama_include);
+    benchmark.root_module.addLibraryPath(llama_build);
+
+    // Link core llama.cpp libraries
+    benchmark.root_module.linkSystemLibrary("llama", .{});
+    benchmark.root_module.linkSystemLibrary("ggml", .{});
+    benchmark.root_module.linkSystemLibrary("ggml-base", .{});
+
+    benchmark.root_module.link_libc = true;
+
+    // Set rpath so the binary can find libraries in the same directory
+    benchmark.root_module.addRPath(.{ .cwd_relative = "$ORIGIN/../lib" });
+    benchmark.root_module.addRPath(.{ .cwd_relative = "$ORIGIN" });
+
+    b.installArtifact(benchmark);
+
+    const run_benchmark = b.addRunArtifact(benchmark);
+    run_benchmark.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_benchmark.addArgs(args);
+    }
+
+    const benchmark_step = b.step("benchmark", "Run inference benchmarks");
+    benchmark_step.dependOn(&run_benchmark.step);
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

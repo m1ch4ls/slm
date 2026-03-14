@@ -343,14 +343,15 @@ pub const ContextHandle = struct {
     ctx: *Context,
     model: *ModelHandle,
 
-    pub fn init(model: *ModelHandle, n_ctx: u32, n_threads: u32) !ContextHandle {
+    pub fn init(model: *ModelHandle, n_ctx: u32, n_threads: u32, n_batch: u32, flash_attn: bool) !ContextHandle {
         var params = llama_context_default_params();
         params.n_ctx = n_ctx;
-        params.n_batch = 512;
-        params.n_ubatch = 512;
+        params.n_batch = n_batch;
+        params.n_ubatch = @min(n_batch, 2048); // ubatch should not exceed 2048 for most GPUs
         params.n_seq_max = 1;
         params.n_threads = @intCast(n_threads);
         params.n_threads_batch = @intCast(n_threads);
+        params.flash_attn_type = if (flash_attn) 1 else 0;
 
         const ctx = llama_new_context_with_model(model.model, params) orelse return error.ContextCreateFailed;
         return ContextHandle{

@@ -2,6 +2,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const llama = @import("llama_api.zig");
 const think_filter = @import("think_filter.zig");
+const inference = @import("inference.zig");
 const posix = std.posix;
 
 const log = std.log.scoped(.daemon);
@@ -29,6 +30,8 @@ const Config = struct {
     n_threads: u32,
     n_gpu_layers: i32,
     main_gpu: i32,
+    n_batch: u32,
+    flash_attn: bool,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Config) void {
@@ -58,6 +61,8 @@ pub fn readConfig(allocator: std.mem.Allocator) !Config {
     var n_threads: u32 = 4;
     var n_gpu_layers: i32 = -1; // -1 means all layers on GPU
     var main_gpu: i32 = 0; // Default to first GPU (discrete GPU), set to -1 to use all GPUs
+    var n_batch: u32 = 2048; // Increased default for better throughput
+    var flash_attn: bool = true; // Enable flash attention by default for performance
 
     errdefer {
         if (model_path) |m| allocator.free(m);
@@ -82,6 +87,10 @@ pub fn readConfig(allocator: std.mem.Allocator) !Config {
             n_gpu_layers = std.fmt.parseInt(i32, value, 10) catch n_gpu_layers;
         } else if (std.mem.eql(u8, key, "main_gpu")) {
             main_gpu = std.fmt.parseInt(i32, value, 10) catch main_gpu;
+        } else if (std.mem.eql(u8, key, "n_batch")) {
+            n_batch = std.fmt.parseInt(u32, value, 10) catch n_batch;
+        } else if (std.mem.eql(u8, key, "flash_attn")) {
+            flash_attn = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
         }
     }
 
@@ -91,6 +100,8 @@ pub fn readConfig(allocator: std.mem.Allocator) !Config {
         .n_threads = n_threads,
         .n_gpu_layers = n_gpu_layers,
         .main_gpu = main_gpu,
+        .n_batch = n_batch,
+        .flash_attn = flash_attn,
         .allocator = allocator,
     };
 }
@@ -118,7 +129,7 @@ pub const Daemon = struct {
 
         log.info("Model loaded, creating context...", .{});
 
-        var ctx = try llama.ContextHandle.init(&model, config.context_size, config.n_threads);
+        var ctx = try llama.ContextHandle.init(&model, config.context_size, config.n_threads, config.n_batch, config.flash_attn);
         errdefer ctx.deinit();
 
         log.info("Context created", .{});
@@ -238,11 +249,6 @@ pub const Daemon = struct {
     fn handleClient(self: *Daemon, client_socket: std.posix.fd_t) !void {
         const file = std.fs.File{ .handle = client_socket };
 
-        const memory = llama.llama_get_memory(self.ctx.ctx);
-        if (memory) |mem| {
-            llama.llama_memory_clear(mem);
-        }
-
         const request = try protocol.readRequest(file, self.allocator);
         defer {
             self.allocator.free(request.prompt);
@@ -255,150 +261,53 @@ pub const Daemon = struct {
             request.max_tokens,
         });
 
-        const formatted_prompt = if (self.chat_template != null) blk: {
-            const user_content = if (request.stdin.len > 0)
-                try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ request.prompt, request.stdin })
-            else
-                try self.allocator.dupe(u8, request.prompt);
-            defer self.allocator.free(user_content);
+        // Create inference engine
+        var engine = inference.InferenceEngine.init(self.allocator, &self.model, &self.ctx);
 
-            const user_content_z = try self.allocator.dupeZ(u8, user_content);
-            defer self.allocator.free(user_content_z);
-
-            const role_z = "user";
-            const messages = [_]llama.ChatMessage{
-                .{ .role = role_z.ptr, .content = user_content_z.ptr },
-            };
-
-            const result = try self.model.applyChatTemplate(
-                self.allocator,
-                &messages,
-                true, // Add assistant marker so model knows to respond as assistant
-            );
-            break :blk result;
-        } else blk: {
-            const full_prompt = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}\n\n{s}",
-                .{ request.prompt, request.stdin },
-            );
-            break :blk full_prompt;
+        // Setup callback context for writing to socket
+        var callback_ctx = SocketCallbackContext{
+            .file = file,
         };
-        defer self.allocator.free(formatted_prompt);
 
-        log.debug("Formatted prompt ({d} bytes): {s}", .{ formatted_prompt.len, formatted_prompt[0..@min(500, formatted_prompt.len)] });
+        const options = inference.InferenceOptions{
+            .max_tokens = request.max_tokens,
+            .use_chat_template = self.chat_template != null,
+            .filter_think_blocks = true,
+        };
 
-        const add_bos = llama.llama_vocab_get_add_bos(self.model.vocab);
-        const tokens = try llama.tokenize(self.allocator, self.model.vocab, formatted_prompt, add_bos);
-        defer self.allocator.free(tokens);
+        // Run inference
+        const stats = try engine.generate(
+            request.prompt,
+            request.stdin,
+            options,
+            socketTokenCallback,
+            &callback_ctx,
+        );
 
-        log.debug("Tokenized to {d} tokens (add_bos={})", .{ tokens.len, add_bos });
-
-        var batch = llama.llama_batch_init(@intCast(tokens.len), 0, 1);
-        defer llama.llama_batch_free(batch);
-
-        for (tokens, 0..) |token, i| {
-            batch.token[i] = token;
-            batch.pos[i] = @intCast(i);
-            batch.n_seq_id[i] = 1;
-            batch.seq_id[i][0] = 0;
-            if (batch.logits) |logits| {
-                logits[i] = if (i == tokens.len - 1) 1 else 0;
-            }
-        }
-        batch.n_tokens = @intCast(tokens.len);
-        if (batch.logits) |logits| {
-            logits[@as(usize, @intCast(batch.n_tokens - 1))] = 1;
-        }
-
-        const decode_result = llama.llama_decode(self.ctx.ctx, batch);
-        if (decode_result != 0) {
-            log.err("llama_decode failed with code {d}", .{decode_result});
-            return error.DecodeFailed;
-        }
-
-        const sampler = llama.llama_sampler_init_greedy();
-        defer llama.llama_sampler_free(sampler);
-
-        var filter = try think_filter.ThinkFilter.init(self.allocator);
-        defer filter.deinit();
-
-        var generated_tokens: u32 = 0;
-        var pos: i32 = @intCast(tokens.len);
-
-        // Antiprompts: strings that trigger stopping when detected in output
-        const antiprompts = &[_][]const u8{"<|im_start|>"};
-        var output_buffer = try std.ArrayList(u8).initCapacity(self.allocator, 1024);
-        defer output_buffer.deinit(self.allocator);
-
-        while (generated_tokens < request.max_tokens) : (generated_tokens += 1) {
-            const new_token = llama.llama_sampler_sample(sampler, self.ctx.ctx, -1);
-
-            log.debug("Sampled token: {d}", .{new_token});
-
-            if (new_token == llama.TokenNull or llama.llama_vocab_is_eog(self.model.vocab, new_token)) {
-                log.debug("EOS token detected (token={d}), stopping", .{new_token});
-                break;
-            }
-
-            const token_text = try llama.detokenize(self.allocator, self.model.vocab, new_token);
-            defer self.allocator.free(token_text);
-
-            // Check for antiprompts in the accumulated output
-            try output_buffer.appendSlice(self.allocator, token_text);
-            const recent_output = output_buffer.items;
-            for (antiprompts) |antiprompt| {
-                if (recent_output.len >= antiprompt.len) {
-                    const end_slice = recent_output[recent_output.len - antiprompt.len ..];
-                    if (std.mem.eql(u8, end_slice, antiprompt)) {
-                        log.debug("Detected antiprompt '{s}' in output, stopping generation", .{antiprompt});
-                        // Don't emit the antiprompt itself
-                        const content_to_emit = recent_output[0 .. recent_output.len - antiprompt.len];
-                        if (content_to_emit.len > 0) {
-                            try protocol.writeToken(file, content_to_emit);
-                        }
-                        break;
-                    }
-                }
-            }
-
-            const chunks = try filter.process(self.allocator, token_text);
-            defer {
-                for (chunks) |chunk| {
-                    self.allocator.free(chunk);
-                }
-                self.allocator.free(chunks);
-            }
-
-            for (chunks) |chunk| {
-                try protocol.writeToken(file, chunk);
-            }
-
-            var new_batch = llama.llama_batch_init(1, 0, 1);
-            defer llama.llama_batch_free(new_batch);
-
-            new_batch.token[0] = new_token;
-            new_batch.pos[0] = pos;
-            new_batch.n_seq_id[0] = 1;
-            new_batch.seq_id[0][0] = 0;
-            if (new_batch.logits) |logits| {
-                logits[0] = 1;
-            }
-            new_batch.n_tokens = 1;
-
-            _ = llama.llama_decode(self.ctx.ctx, new_batch);
-            pos += 1;
-        }
-
-        // Flush any remaining content
-        if (try filter.flush(self.allocator)) |remaining| {
-            defer self.allocator.free(remaining);
-            try protocol.writeToken(file, remaining);
-        }
+        log.info("Generation complete: {d} tokens in {d}ms ({d:.2} tok/s)", .{
+            stats.generated_tokens,
+            stats.elapsed_ms,
+            stats.tokens_per_second,
+        });
 
         try protocol.writeEndMarker(file);
     }
 };
+
+/// Context for socket callback
+const SocketCallbackContext = struct {
+    file: std.fs.File,
+};
+
+/// Callback that writes tokens to socket
+fn socketTokenCallback(chunk: []const u8, userdata: ?*anyopaque) bool {
+    const ctx = @as(*SocketCallbackContext, @ptrCast(@alignCast(userdata.?)));
+    protocol.writeToken(ctx.file, chunk) catch |err| {
+        log.err("Failed to write token: {}", .{err});
+        return false; // Stop generation on error
+    };
+    return true; // Continue generation
+}
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
