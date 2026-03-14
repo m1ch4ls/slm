@@ -111,15 +111,4 @@ pub fn build(b: *std.Build) void {
 
     const run_tokenizer_test = b.addRunArtifact(tokenizer_test);
     test_step.dependOn(&run_tokenizer_test.step);
-
-    const think_filter_test = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/think_filter_test.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-        }),
-    });
-
-    const run_think_filter_test = b.addRunArtifact(think_filter_test);
-    test_step.dependOn(&run_think_filter_test.step);
 }

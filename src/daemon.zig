@@ -273,7 +273,7 @@ pub const Daemon = struct {
             const result = try self.model.applyChatTemplate(
                 self.allocator,
                 &messages,
-                true,
+                true, // Add assistant marker so model knows to respond as assistant
             );
             break :blk result;
         } else blk: {
@@ -286,7 +286,7 @@ pub const Daemon = struct {
         };
         defer self.allocator.free(formatted_prompt);
 
-        log.debug("Formatted prompt ({d} bytes): {s}", .{ formatted_prompt.len, formatted_prompt[0..@min(200, formatted_prompt.len)] });
+        log.debug("Formatted prompt ({d} bytes): {s}", .{ formatted_prompt.len, formatted_prompt[0..@min(500, formatted_prompt.len)] });
 
         const add_bos = llama.llama_vocab_get_add_bos(self.model.vocab);
         const tokens = try llama.tokenize(self.allocator, self.model.vocab, formatted_prompt, add_bos);
@@ -326,6 +326,11 @@ pub const Daemon = struct {
         var generated_tokens: u32 = 0;
         var pos: i32 = @intCast(tokens.len);
 
+        // Antiprompts: strings that trigger stopping when detected in output
+        const antiprompts = &[_][]const u8{"<|im_start|>"};
+        var output_buffer = try std.ArrayList(u8).initCapacity(self.allocator, 1024);
+        defer output_buffer.deinit(self.allocator);
+
         while (generated_tokens < request.max_tokens) : (generated_tokens += 1) {
             const new_token = llama.llama_sampler_sample(sampler, self.ctx.ctx, -1);
 
@@ -339,13 +344,33 @@ pub const Daemon = struct {
             const token_text = try llama.detokenize(self.allocator, self.model.vocab, new_token);
             defer self.allocator.free(token_text);
 
-            var output = try think_filter.OutputBuffer.init(self.allocator);
-            defer output.deinit();
+            // Check for antiprompts in the accumulated output
+            try output_buffer.appendSlice(self.allocator, token_text);
+            const recent_output = output_buffer.items;
+            for (antiprompts) |antiprompt| {
+                if (recent_output.len >= antiprompt.len) {
+                    const end_slice = recent_output[recent_output.len - antiprompt.len ..];
+                    if (std.mem.eql(u8, end_slice, antiprompt)) {
+                        log.debug("Detected antiprompt '{s}' in output, stopping generation", .{antiprompt});
+                        // Don't emit the antiprompt itself
+                        const content_to_emit = recent_output[0 .. recent_output.len - antiprompt.len];
+                        if (content_to_emit.len > 0) {
+                            try protocol.writeToken(file, content_to_emit);
+                        }
+                        break;
+                    }
+                }
+            }
 
-            try filter.process(token_text, &output);
+            const chunks = try filter.process(self.allocator, token_text);
+            defer {
+                for (chunks) |chunk| {
+                    self.allocator.free(chunk);
+                }
+                self.allocator.free(chunks);
+            }
 
-            // Write each chunk as a separate token
-            for (output.chunks.items) |chunk| {
+            for (chunks) |chunk| {
                 try protocol.writeToken(file, chunk);
             }
 
@@ -365,14 +390,10 @@ pub const Daemon = struct {
             pos += 1;
         }
 
-        var final_output = try think_filter.OutputBuffer.init(self.allocator);
-        defer final_output.deinit();
-
-        try filter.flush(&final_output);
-
-        // Write remaining chunks
-        for (final_output.chunks.items) |chunk| {
-            try protocol.writeToken(file, chunk);
+        // Flush any remaining content
+        if (try filter.flush(self.allocator)) |remaining| {
+            defer self.allocator.free(remaining);
+            try protocol.writeToken(file, remaining);
         }
 
         try protocol.writeEndMarker(file);
@@ -387,7 +408,7 @@ pub fn main() !void {
     // Load dynamic backends from the distribution lib directory
     // With GGML_BACKEND_DL, backends are loaded at runtime from .so files
     // First try path relative to executable, then fall back to dev path
-    
+
     // Get the directory where this binary is located
     var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
 
@@ -401,12 +422,12 @@ pub fn main() !void {
         log.warn("Could not determine executable directory: {s}", .{@errorName(err)});
         break :blk "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin";
     };
-    
+
     const backend_paths = &[_][*:0]const u8{
-        lib_path,  // Distribution: backends in lib/ subdirectory relative to binary
-        "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin",  // Development
+        lib_path, // Distribution: backends in lib/ subdirectory relative to binary
+        "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin", // Development
     };
-    
+
     for (backend_paths) |path| {
         log.info("Loading dynamic backends from: {s}", .{path});
         llama.ggml_backend_load_all_from_path(path);
