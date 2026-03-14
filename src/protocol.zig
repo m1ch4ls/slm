@@ -106,6 +106,102 @@ pub fn readToken(file: std.fs.File, allocator: std.mem.Allocator) !?[]const u8 {
     return try readLengthPrefixedFile(file, allocator, len);
 }
 
+/// Read multiple tokens into a pre-allocated buffer.
+/// Returns the total bytes written to output_buffer.
+/// output_buffer must be large enough to hold at least one max-size token (65535 bytes).
+/// Caller should check if a complete token was read (returned_len >= 2 + token_len).
+pub fn readTokensIntoBuffer(file: std.fs.File, output_buffer: []u8) !usize {
+    if (output_buffer.len < 2) return error.BufferTooSmall;
+
+    var total_read: usize = 0;
+    var buf = output_buffer;
+
+    while (buf.len >= 2) {
+        // Try to read the length prefix
+        var len_buf: [2]u8 = undefined;
+        const len_read = file.read(&len_buf) catch |err| {
+            if (total_read == 0) return err;
+            break; // Return what we have so far
+        };
+
+        if (len_read == 0) {
+            if (total_read == 0) return error.EndOfStream;
+            break; // EOF, return what we have
+        }
+
+        if (len_read != 2) {
+            // Partial length read - shouldn't happen with blocking sockets but handle it
+            return error.PartialRead;
+        }
+
+        const token_len = std.mem.readInt(u16, &len_buf, .little);
+
+        // Check for end marker
+        if (token_len == 0) {
+            // Write the end marker to buffer as 2 zero bytes
+            buf[0] = 0;
+            buf[1] = 0;
+            total_read += 2;
+            break;
+        }
+
+        // Check if we have room for this token
+        if (buf.len < 2 + token_len) {
+            // Not enough room - put back would need unget, instead we just return
+            // what we have and let caller handle this on next iteration
+            break;
+        }
+
+        // Write length to output buffer
+        buf[0] = len_buf[0];
+        buf[1] = len_buf[1];
+
+        // Read the token data
+        var token_offset: usize = 2;
+        while (token_offset < 2 + token_len) {
+            const n = file.read(buf[token_offset .. 2 + token_len]) catch |err| {
+                if (total_read == 0) return err;
+                break;
+            };
+            if (n == 0) {
+                if (total_read == 0) return error.EndOfStream;
+                break;
+            }
+            token_offset += n;
+        }
+
+        const bytes_this_token = 2 + token_len;
+        total_read += bytes_this_token;
+        buf = buf[bytes_this_token..];
+    }
+
+    return total_read;
+}
+
+/// Parse tokens from a buffer and write them to a writer.
+/// Returns true if an end marker (0-length token) was found.
+pub fn writeTokensFromBuffer(buffer: []const u8, writer: anytype) !bool {
+    var offset: usize = 0;
+
+    while (offset + 2 <= buffer.len) {
+        const token_len = std.mem.readInt(u16, buffer[offset..][0..2], .little);
+
+        if (token_len == 0) {
+            return true; // End marker found
+        }
+
+        if (offset + 2 + token_len > buffer.len) {
+            // Incomplete token at end of buffer
+            break;
+        }
+
+        try writer.writeAll(buffer[offset + 2 .. offset + 2 + token_len]);
+        offset += 2 + token_len;
+    }
+
+    return false;
+}
+
 test "writeRequest and readRequest roundtrip" {
     const file = try std.fs.createFileAbsolute("/tmp/protocol_test", .{});
     defer file.close();

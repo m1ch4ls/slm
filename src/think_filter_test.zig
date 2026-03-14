@@ -15,10 +15,10 @@ test "ThinkFilter strips empty think block" {
     try filter.flush(&output);
 
     // Concatenate all chunks for comparison
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer result.deinit(allocator);
     for (output.chunks.items) |chunk| {
-        try result.appendSlice(chunk);
+        try result.appendSlice(allocator, chunk);
     }
 
     // Newlines after </think> are preserved
@@ -37,10 +37,10 @@ test "ThinkFilter strips think block with content" {
     try filter.process(input, &output);
     try filter.flush(&output);
 
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer result.deinit(allocator);
     for (output.chunks.items) |chunk| {
-        try result.appendSlice(chunk);
+        try result.appendSlice(allocator, chunk);
     }
 
     try std.testing.expectEqualStrings("\nThe answer is 42.", result.items);
@@ -58,10 +58,10 @@ test "ThinkFilter handles text before think block" {
     try filter.process(input, &output);
     try filter.flush(&output);
 
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer result.deinit(allocator);
     for (output.chunks.items) |chunk| {
-        try result.appendSlice(chunk);
+        try result.appendSlice(allocator, chunk);
     }
 
     try std.testing.expectEqualStrings("HelloWorld", result.items);
@@ -79,10 +79,10 @@ test "ThinkFilter handles multiple think blocks" {
     try filter.process(input, &output);
     try filter.flush(&output);
 
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer result.deinit(allocator);
     for (output.chunks.items) |chunk| {
-        try result.appendSlice(chunk);
+        try result.appendSlice(allocator, chunk);
     }
 
     try std.testing.expectEqualStrings("ABC", result.items);
@@ -104,10 +104,10 @@ test "ThinkFilter handles incomplete think tag across process calls" {
     try filter.process("nk>content</think>output", &output);
     try filter.flush(&output);
 
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer result.deinit(allocator);
     for (output.chunks.items) |chunk| {
-        try result.appendSlice(chunk);
+        try result.appendSlice(allocator, chunk);
     }
 
     // Actual behavior: "<thi" gets emitted because 'i' is alphabetic
@@ -129,10 +129,10 @@ test "ThinkFilter handles partial closing tag" {
     try filter.process("think>visible", &output);
     try filter.flush(&output);
 
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer result.deinit(allocator);
     for (output.chunks.items) |chunk| {
-        try result.appendSlice(chunk);
+        try result.appendSlice(allocator, chunk);
     }
 
     try std.testing.expectEqualStrings("visible", result.items);
@@ -150,10 +150,10 @@ test "ThinkFilter handles text without think blocks" {
     try filter.process(input, &output);
     try filter.flush(&output);
 
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer result.deinit(allocator);
     for (output.chunks.items) |chunk| {
-        try result.appendSlice(chunk);
+        try result.appendSlice(allocator, chunk);
     }
 
     try std.testing.expectEqualStrings(input, result.items);
@@ -172,10 +172,10 @@ test "ThinkFilter handles only opening think tag" {
     try filter.process(input, &output);
     try filter.flush(&output);
 
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
+    var result = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer result.deinit(allocator);
     for (output.chunks.items) |chunk| {
-        try result.appendSlice(chunk);
+        try result.appendSlice(allocator, chunk);
     }
 
     // Everything should be stripped since we never closed the think block

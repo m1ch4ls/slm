@@ -8,7 +8,7 @@ const DaemonClient = struct {
     socket: ?std.posix.fd_t,
 
     pub fn init(allocator: std.mem.Allocator) !DaemonClient {
-        const uid = std.os.linux.getuid();
+        const uid = std.posix.getuid();
         const socket_path = try std.fmt.allocPrint(allocator, "/run/user/{d}/slm/daemon.sock", .{uid});
 
         return DaemonClient{
@@ -94,19 +94,60 @@ const DaemonClient = struct {
         try protocol.writeRequest(file, request);
     }
 
-    pub fn readResponse(self: *DaemonClient, allocator: std.mem.Allocator) !void {
+    pub fn readResponse(self: *DaemonClient) !void {
         const socket = self.socket orelse return error.NotConnected;
         const file = std.fs.File{ .handle = socket };
 
-        const stdout = std.fs.File.stdout();
+        // Buffered stdout writer - 4KB buffer to batch writes
+        var stdout_buffer: [4096]u8 = undefined;
+        var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        const writer: *std.Io.Writer = &stdout_writer.interface;
+
+        // Chunk buffer for reading tokens from socket
+        var chunk_buffer: [4096]u8 = undefined;
+        var chunk_offset: usize = 0;
+        var chunk_len: usize = 0;
 
         while (true) {
-            const token = (try protocol.readToken(file, allocator)) orelse break;
-            defer allocator.free(token);
+            // Fill the chunk buffer
+            const bytes_read = try protocol.readTokensIntoBuffer(file, chunk_buffer[chunk_len..]);
+            if (bytes_read == 0) break;
+            chunk_len += bytes_read;
 
-            try stdout.writeAll(token);
+            // Parse and write complete tokens from buffer
+            var parse_offset: usize = chunk_offset;
+            while (parse_offset + 2 <= chunk_len) {
+                const token_len = std.mem.readInt(u16, chunk_buffer[parse_offset..][0..2], .little);
+
+                // Check for end marker
+                if (token_len == 0) {
+                    try writer.flush();
+                    return;
+                }
+
+                // Check if we have a complete token
+                if (parse_offset + 2 + token_len > chunk_len) {
+                    break; // Incomplete token, need more data
+                }
+
+                // Write token data to buffered stdout
+                try writer.writeAll(chunk_buffer[parse_offset + 2 .. parse_offset + 2 + token_len]);
+                parse_offset += 2 + token_len;
+            }
+
+            // Move any incomplete token data to front of buffer
+            if (parse_offset < chunk_len) {
+                const remaining = chunk_len - parse_offset;
+                std.mem.copyForwards(u8, chunk_buffer[0..remaining], chunk_buffer[parse_offset..chunk_len]);
+                chunk_len = remaining;
+            } else {
+                chunk_len = 0;
+            }
+            chunk_offset = 0;
         }
-        try stdout.writeAll("\n");
+
+        try writer.flush();
+        try std.fs.File.stdout().writeAll("\n");
     }
 };
 
@@ -140,7 +181,7 @@ pub fn main() !void {
     };
 
     try client.sendRequest(request);
-    try client.readResponse(allocator);
+    try client.readResponse();
 }
 
 fn readStdin(allocator: std.mem.Allocator) ![]const u8 {

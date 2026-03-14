@@ -51,14 +51,22 @@ pub fn build(b: *std.Build) void {
         daemon.want_lto = false;
     }
 
-    daemon.addIncludePath(llama_include);
-    daemon.addLibraryPath(llama_build);
+    daemon.root_module.addIncludePath(llama_include);
+    daemon.root_module.addLibraryPath(llama_build);
 
-    daemon.linkSystemLibrary("llama");
-    daemon.linkSystemLibrary("ggml");
-    daemon.linkSystemLibrary("ggml-base");
-    daemon.linkSystemLibrary("ggml-cpu");
-    daemon.linkLibC();
+    // Link core llama.cpp libraries (shared libs required for GGML_BACKEND_DL)
+    daemon.root_module.linkSystemLibrary("llama", .{});
+    daemon.root_module.linkSystemLibrary("ggml", .{});
+    daemon.root_module.linkSystemLibrary("ggml-base", .{});
+    // Note: Backends (ggml-cpu, ggml-hip, etc.) are loaded dynamically at runtime
+    // via ggml_backend_load_all_from_path() based on availability
+
+    daemon.root_module.link_libc = true;
+    
+    // Set rpath so the binary can find libraries in the same directory
+    // $ORIGIN is a special ELF value meaning "directory where the binary is located"
+    daemon.root_module.addRPath(.{ .cwd_relative = "$ORIGIN/../lib" });
+    daemon.root_module.addRPath(.{ .cwd_relative = "$ORIGIN" });
 
     b.installArtifact(daemon);
 

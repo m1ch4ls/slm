@@ -3,7 +3,6 @@ const protocol = @import("protocol.zig");
 const llama = @import("llama_api.zig");
 const think_filter = @import("think_filter.zig");
 const posix = std.posix;
-const linux = std.os.linux;
 
 const log = std.log.scoped(.daemon);
 
@@ -28,6 +27,8 @@ const Config = struct {
     model_path: []const u8,
     context_size: u32,
     n_threads: u32,
+    n_gpu_layers: i32,
+    main_gpu: i32,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Config) void {
@@ -55,6 +56,8 @@ pub fn readConfig(allocator: std.mem.Allocator) !Config {
     var model_path: ?[]const u8 = null;
     var context_size: u32 = 32768;
     var n_threads: u32 = 4;
+    var n_gpu_layers: i32 = -1; // -1 means all layers on GPU
+    var main_gpu: i32 = 0; // Default to first GPU (discrete GPU), set to -1 to use all GPUs
 
     errdefer {
         if (model_path) |m| allocator.free(m);
@@ -75,6 +78,10 @@ pub fn readConfig(allocator: std.mem.Allocator) !Config {
             context_size = std.fmt.parseInt(u32, value, 10) catch context_size;
         } else if (std.mem.eql(u8, key, "n_threads")) {
             n_threads = std.fmt.parseInt(u32, value, 10) catch n_threads;
+        } else if (std.mem.eql(u8, key, "n_gpu_layers")) {
+            n_gpu_layers = std.fmt.parseInt(i32, value, 10) catch n_gpu_layers;
+        } else if (std.mem.eql(u8, key, "main_gpu")) {
+            main_gpu = std.fmt.parseInt(i32, value, 10) catch main_gpu;
         }
     }
 
@@ -82,6 +89,8 @@ pub fn readConfig(allocator: std.mem.Allocator) !Config {
         .model_path = model_path orelse return error.MissingModelConfig,
         .context_size = context_size,
         .n_threads = n_threads,
+        .n_gpu_layers = n_gpu_layers,
+        .main_gpu = main_gpu,
         .allocator = allocator,
     };
 }
@@ -98,8 +107,11 @@ pub const Daemon = struct {
     pub fn init(allocator: std.mem.Allocator, config: Config) !Daemon {
         log.info("Loading model from {s}", .{config.model_path});
 
-        const model_params = llama.llama_model_default_params();
-        log.info("Model params: n_gpu_layers={}, use_mmap={}", .{ model_params.n_gpu_layers, model_params.use_mmap });
+        var model_params = llama.llama_model_default_params();
+        model_params.n_gpu_layers = config.n_gpu_layers;
+        model_params.split_mode = 0; // Use single GPU mode (LLAMA_SPLIT_MODE_NONE)
+        model_params.main_gpu = config.main_gpu; // Which GPU to use (0 = first discrete GPU)
+        log.info("Model params: n_gpu_layers={}, main_gpu={}, use_mmap={}", .{ model_params.n_gpu_layers, model_params.main_gpu, model_params.use_mmap });
 
         var model = try llama.ModelHandle.load(allocator, config.model_path, model_params);
         errdefer model.deinit();
@@ -118,7 +130,7 @@ pub const Daemon = struct {
             log.info("No chat template found, using raw prompts", .{});
         }
 
-        const uid = std.os.linux.getuid();
+        const uid = posix.getuid();
         const socket_path = try std.fmt.allocPrint(allocator, "/run/user/{d}/slm/daemon.sock", .{uid});
         errdefer allocator.free(socket_path);
 
@@ -368,10 +380,39 @@ pub const Daemon = struct {
 };
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // Load dynamic backends from the distribution lib directory
+    // With GGML_BACKEND_DL, backends are loaded at runtime from .so files
+    // First try path relative to executable, then fall back to dev path
+    
+    // Get the directory where this binary is located
+    var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    const lib_path = if (std.fs.selfExeDirPath(&exe_dir_buf)) |exe_dir| blk: {
+        // Try lib/ relative to the executable
+        break :blk std.fs.path.joinZ(allocator, &[_][]const u8{ exe_dir, "lib" }) catch |err| {
+            log.warn("Could not construct lib path: {s}", .{@errorName(err)});
+            break :blk "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin";
+        };
+    } else |err| blk: {
+        log.warn("Could not determine executable directory: {s}", .{@errorName(err)});
+        break :blk "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin";
+    };
+    
+    const backend_paths = &[_][*:0]const u8{
+        lib_path,  // Distribution: backends in lib/ subdirectory relative to binary
+        "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin",  // Development
+    };
+    
+    for (backend_paths) |path| {
+        log.info("Loading dynamic backends from: {s}", .{path});
+        llama.ggml_backend_load_all_from_path(path);
+    }
+
+    // Now initialize llama (after backends are loaded)
     llama.llama_backend_init();
     defer llama.llama_backend_free();
 

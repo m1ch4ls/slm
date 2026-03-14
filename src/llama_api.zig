@@ -143,6 +143,14 @@ pub extern fn llama_sampler_free(smpl: *Sampler) void;
 pub extern fn llama_backend_init() void;
 pub extern fn llama_backend_free() void;
 
+pub extern fn ggml_backend_load_all() void;
+pub extern fn ggml_backend_load_all_from_path(path: [*:0]const u8) void;
+
+// Backend registration types and functions (for manual backend registration)
+// Note: With GGML_BACKEND_DL, backends are loaded dynamically at runtime
+// and these manual registration functions are not needed
+pub const BackendReg = opaque {};
+
 pub extern fn llama_get_memory(ctx: *Context) ?*anyopaque;
 pub extern fn llama_memory_clear(mem: *anyopaque) void;
 
@@ -209,7 +217,7 @@ pub fn preprocessChatTemplate(allocator: std.mem.Allocator, template: []const u8
     // Qwen3.5 template pattern: if enable_thinking is defined and enable_thinking is false
     // We replace this with just the false case output: '<think>\n\n</think>\n\n'
     const false_pattern = "{{- '<think>\\n\\n</think>\\n\\n' }}";
-    
+
     // Simple replacement for Qwen3.5 style template
     // Look for the pattern and replace the conditional with the false output
     if (std.mem.indexOf(u8, template, "enable_thinking")) |start_idx| {
@@ -222,26 +230,26 @@ pub fn preprocessChatTemplate(allocator: std.mem.Allocator, template: []const u8
             }
             if (if_start == 0) break;
         }
-        
+
         // Find the end of the endif block
         const endif_pattern = "{%- endif %}";
         if (std.mem.indexOf(u8, template[start_idx..], endif_pattern)) |endif_rel| {
             const endif_end = start_idx + endif_rel + endif_pattern.len;
-            
+
             // Build new template with replacement (null-terminated)
             const new_len = if_start + false_pattern.len + (template.len - endif_end);
             const new_template = try allocator.alloc(u8, new_len + 1);
-            
+
             // Copy parts: before if + replacement + after endif
             @memcpy(new_template[0..if_start], template[0..if_start]);
-            @memcpy(new_template[if_start..if_start + false_pattern.len], false_pattern);
-            @memcpy(new_template[if_start + false_pattern.len..new_len], template[endif_end..]);
+            @memcpy(new_template[if_start .. if_start + false_pattern.len], false_pattern);
+            @memcpy(new_template[if_start + false_pattern.len .. new_len], template[endif_end..]);
             new_template[new_len] = 0; // null terminator
-            
+
             return new_template[0..new_len :0];
         }
     }
-    
+
     // No modification needed, return null-terminated copy of original
     return try allocator.dupeZ(u8, template);
 }
