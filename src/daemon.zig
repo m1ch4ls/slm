@@ -261,12 +261,16 @@ pub const Daemon = struct {
             request.max_tokens,
         });
 
+        // Create token buffer for batching writes
+        var token_buffer = protocol.TokenBuffer.init(file);
+
         // Create inference engine
         var engine = inference.InferenceEngine.init(self.allocator, &self.model, &self.ctx);
 
-        // Setup callback context for writing to socket
-        var callback_ctx = SocketCallbackContext{
-            .file = file,
+        // Setup callback context for writing to token buffer
+        var callback_ctx = TokenBufferCallbackContext{
+            .token_buffer = &token_buffer,
+            .last_flush_ms = std.time.milliTimestamp(),
         };
 
         const options = inference.InferenceOptions{
@@ -280,7 +284,7 @@ pub const Daemon = struct {
             request.prompt,
             request.stdin,
             options,
-            socketTokenCallback,
+            tokenBufferCallback,
             &callback_ctx,
         );
 
@@ -290,22 +294,36 @@ pub const Daemon = struct {
             stats.tokens_per_second,
         });
 
-        try protocol.writeEndMarker(file);
+        try token_buffer.writeEndMarker();
     }
 };
 
-/// Context for socket callback
-const SocketCallbackContext = struct {
-    file: std.fs.File,
+/// Context for token buffer callback
+const TokenBufferCallbackContext = struct {
+    token_buffer: *protocol.TokenBuffer,
+    last_flush_ms: i64,
 };
 
-/// Callback that writes tokens to socket
-fn socketTokenCallback(chunk: []const u8, userdata: ?*anyopaque) bool {
-    const ctx = @as(*SocketCallbackContext, @ptrCast(@alignCast(userdata.?)));
-    protocol.writeToken(ctx.file, chunk) catch |err| {
+/// Callback that writes tokens to buffered output with periodic flushing
+fn tokenBufferCallback(chunk: []const u8, userdata: ?*anyopaque) bool {
+    const ctx = @as(*TokenBufferCallbackContext, @ptrCast(@alignCast(userdata.?)));
+
+    // Write token to buffer
+    _ = ctx.token_buffer.writeToken(chunk) catch |err| {
         log.err("Failed to write token: {}", .{err});
         return false; // Stop generation on error
     };
+
+    // Flush every 100ms for fluid streaming
+    const now = std.time.milliTimestamp();
+    if (now - ctx.last_flush_ms >= 100) {
+        ctx.token_buffer.flush() catch |err| {
+            log.err("Failed to flush token buffer: {}", .{err});
+            return false;
+        };
+        ctx.last_flush_ms = now;
+    }
+
     return true; // Continue generation
 }
 

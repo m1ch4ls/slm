@@ -98,10 +98,7 @@ const DaemonClient = struct {
         const socket = self.socket orelse return error.NotConnected;
         const file = std.fs.File{ .handle = socket };
 
-        // Buffered stdout writer - 4KB buffer to batch writes
-        var stdout_buffer: [4096]u8 = undefined;
-        var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-        const writer: *std.Io.Writer = &stdout_writer.interface;
+        const stdout = std.fs.File.stdout();
 
         // Chunk buffer for reading tokens from socket
         var chunk_buffer: [4096]u8 = undefined;
@@ -121,7 +118,6 @@ const DaemonClient = struct {
 
                 // Check for end marker
                 if (token_len == 0) {
-                    try writer.flush();
                     return;
                 }
 
@@ -130,8 +126,8 @@ const DaemonClient = struct {
                     break; // Incomplete token, need more data
                 }
 
-                // Write token data to buffered stdout
-                try writer.writeAll(chunk_buffer[parse_offset + 2 .. parse_offset + 2 + token_len]);
+                // Write token data directly to stdout
+                try stdout.writeAll(chunk_buffer[parse_offset + 2 .. parse_offset + 2 + token_len]);
                 parse_offset += 2 + token_len;
             }
 
@@ -146,8 +142,7 @@ const DaemonClient = struct {
             chunk_offset = 0;
         }
 
-        try writer.flush();
-        try std.fs.File.stdout().writeAll("\n");
+        try stdout.writeAll("\n");
     }
 };
 

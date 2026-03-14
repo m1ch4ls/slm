@@ -96,6 +96,80 @@ pub fn writeEndMarker(file: std.fs.File) !void {
     try file.writeAll(&len_buf);
 }
 
+/// Buffered writer for tokens to reduce syscall overhead.
+/// Accumulates tokens with length prefixes and flushes in batches.
+/// Use flush() periodically (e.g., every 100ms) for fluid streaming.
+pub const TokenBuffer = struct {
+    buf: [4096]u8,
+    len: usize,
+    file: std.fs.File,
+
+    pub fn init(file: std.fs.File) TokenBuffer {
+        return .{
+            .buf = undefined,
+            .len = 0,
+            .file = file,
+        };
+    }
+
+    /// Write a token to the buffer. Flushes automatically if needed.
+    /// Returns true if the token was written successfully.
+    /// Returns false if a flush was needed but failed (caller should stop).
+    pub fn writeToken(self: *TokenBuffer, token: []const u8) !bool {
+        if (token.len > 65535) return error.BufferOverflow;
+
+        const needed = 2 + token.len;
+
+        // If this single token is larger than the buffer, we need to flush
+        // what we have and write this token directly
+        if (needed > self.buf.len) {
+            try self.flush();
+            var len_buf: [2]u8 = undefined;
+            std.mem.writeInt(u16, &len_buf, @intCast(token.len), .little);
+            try self.file.writeAll(&len_buf);
+            try self.file.writeAll(token);
+            return true;
+        }
+
+        // If it won't fit, flush first
+        if (self.len + needed > self.buf.len) {
+            try self.flush();
+        }
+
+        // Write length prefix
+        std.mem.writeInt(u16, self.buf[self.len..][0..2], @intCast(token.len), .little);
+        self.len += 2;
+
+        // Write token data
+        @memcpy(self.buf[self.len..][0..token.len], token);
+        self.len += token.len;
+
+        return true;
+    }
+
+    /// Flush any buffered data to the file.
+    pub fn flush(self: *TokenBuffer) !void {
+        if (self.len > 0) {
+            try self.file.writeAll(self.buf[0..self.len]);
+            self.len = 0;
+        }
+    }
+
+    /// Write end marker and flush remaining data.
+    pub fn writeEndMarker(self: *TokenBuffer) !void {
+        // Ensure we have room for end marker (2 bytes)
+        if (self.len + 2 > self.buf.len) {
+            try self.flush();
+        }
+
+        self.buf[self.len] = 0;
+        self.buf[self.len + 1] = 0;
+        self.len += 2;
+
+        try self.flush();
+    }
+};
+
 pub fn readToken(file: std.fs.File, allocator: std.mem.Allocator) !?[]const u8 {
     var len_buf: [2]u8 = undefined;
     try readExactFile(file, &len_buf);
