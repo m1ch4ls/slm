@@ -1,0 +1,44 @@
+# Simplified Promptfoo configuration for SLM Daemon evaluation
+# Quick tests to verify daemon functionality
+
+description: "SLM Daemon Quick Evaluation"
+
+providers:
+  - id: file://./eval/providers/slm-daemon.js
+    config:
+      daemonPath: ./zig-out/bin/slm
+      timeout: 60000
+
+prompts:
+  - '{{prompt}}'
+
+tests:
+  # Basic functionality
+  - description: 'Basic prompt - hello'
+    vars:
+      prompt: 'hello'
+    assert:
+      - type: contains-any
+        value: ['hello', 'Hello']
+  
+  - description: 'Basic prompt - count to 5'
+    vars:
+      prompt: 'count from 1 to 5'
+    assert:
+      - type: contains-any
+        value: ['1', '2', '3', '4', '5']
+
+  - description: 'Question answering'
+    vars:
+      prompt: 'What is 2+2? Answer with just the number.'
+    assert:
+      - type: contains-any
+        value: ['4']
+
+  # Performance test
+  - description: 'Response time'
+    vars:
+      prompt: 'say "test completed"'
+    assert:
+      - type: latency
+        threshold: 30000

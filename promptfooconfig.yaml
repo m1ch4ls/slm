@@ -1,0 +1,75 @@
+# Promptfoo configuration for SLM Daemon evaluation
+# Documentation: https://promptfoo.dev/docs/
+
+description: "SLM Daemon Evaluation - Testing basic functionality, edge cases, and performance"
+
+providers:
+  - id: file://./eval/providers/slm-daemon.js
+    label: 'slm-daemon'
+    config:
+      daemonPath: ./zig-out/bin/slm
+      timeout: 60000
+
+prompts:
+  - '{{prompt}}'
+
+# Test cases covering basic functionality, edge cases, performance
+tests:
+  # === BASIC FUNCTIONALITY ===
+  - description: 'Simple greeting'
+    vars:
+      prompt: 'hello'
+    assert:
+      - type: contains-any
+        value: ['hello', 'Hello', 'Hi', 'Greetings']
+
+  - description: 'Question answering - math'
+    vars:
+      prompt: 'What is 2+2? Answer with just the number.'
+    assert:
+      - type: contains
+        value: '4'
+
+  - description: 'Following instructions'
+    vars:
+      prompt: 'Count from 1 to 3'
+    assert:
+      - type: contains-any
+        value: ['1', '2', '3']
+
+  # === EDGE CASES ===
+  - description: 'Very long input handling'
+    vars:
+      prompt: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+    assert:
+      - type: not-contains
+        value: 'error'
+
+  - description: 'Unicode handling'
+    vars:
+      prompt: 'Hello! ¿Cómo estás? 你好 🎉'
+    assert:
+      - type: not-contains
+        value: 'error'
+
+  - description: 'Code snippet'
+    vars:
+      prompt: 'What does this code do: function add(a, b) { return a + b; }'
+    assert:
+      - type: contains-any
+        value: ['add', 'sum', 'function', 'returns']
+
+  # === PERFORMANCE ===
+  - description: 'Hot request latency'
+    vars:
+      prompt: 'Say "test"'
+    assert:
+      - type: latency
+        threshold: 5000  # 5 seconds (includes model inference time)
+
+# Custom metrics
+derivedMetrics:
+  - name: 'avg_latency_ms'
+    value: 'latency_sum / __count'
+  - name: 'success_rate'
+    value: '(__count - __error_count) / __count'
