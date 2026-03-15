@@ -4,6 +4,7 @@ const protocol = @import("protocol.zig");
 const log = std.log.scoped(.slm);
 
 const DaemonClient = struct {
+    allocator: std.mem.Allocator,
     socket_path: []const u8,
     socket: ?std.posix.fd_t,
 
@@ -12,21 +13,22 @@ const DaemonClient = struct {
         const socket_path = try std.fmt.allocPrint(allocator, "/run/user/{d}/slm/daemon.sock", .{uid});
 
         return DaemonClient{
+            .allocator = allocator,
             .socket_path = socket_path,
             .socket = null,
         };
     }
 
-    pub fn deinit(self: *DaemonClient, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *DaemonClient) void {
         if (self.socket) |sock| {
             std.posix.close(sock);
         }
-        allocator.free(self.socket_path);
+        self.allocator.free(self.socket_path);
     }
 
     pub fn connect(self: *DaemonClient) !void {
-        const socket_path_z = try std.heap.page_allocator.dupeZ(u8, self.socket_path);
-        defer std.heap.page_allocator.free(socket_path_z);
+        const socket_path_z = try self.allocator.dupeZ(u8, self.socket_path);
+        defer self.allocator.free(socket_path_z);
 
         var addr: std.posix.sockaddr.un = std.mem.zeroes(std.posix.sockaddr.un);
         addr.family = std.posix.AF.UNIX;
@@ -69,17 +71,16 @@ const DaemonClient = struct {
     }
 
     fn spawnDaemon(self: *DaemonClient) !void {
-        _ = self;
-        const self_exe = try std.fs.selfExePathAlloc(std.heap.page_allocator);
-        defer std.heap.page_allocator.free(self_exe);
+        const self_exe = try std.fs.selfExePathAlloc(self.allocator);
+        defer self.allocator.free(self_exe);
 
         const daemon_path = blk: {
             const dir = std.fs.path.dirname(self_exe) orelse "/usr/bin";
-            break :blk try std.fs.path.join(std.heap.page_allocator, &.{ dir, "slm-daemon" });
+            break :blk try std.fs.path.join(self.allocator, &.{ dir, "slm-daemon" });
         };
-        defer std.heap.page_allocator.free(daemon_path);
+        defer self.allocator.free(daemon_path);
 
-        var child = std.process.Child.init(&[_][]const u8{daemon_path}, std.heap.page_allocator);
+        var child = std.process.Child.init(&[_][]const u8{daemon_path}, self.allocator);
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Ignore;
         child.stderr_behavior = .Ignore;
@@ -102,9 +103,9 @@ const DaemonClient = struct {
 
         // Read one token at a time for immediate output
         while (true) {
-            const token = try protocol.readToken(file, std.heap.page_allocator);
+            const token = try protocol.readToken(file, self.allocator);
             if (token == null) return; // End marker
-            defer std.heap.page_allocator.free(token.?);
+            defer self.allocator.free(token.?);
 
             try stdout.writeAll(token.?);
         }
@@ -130,14 +131,14 @@ pub fn main() !void {
     defer allocator.free(stdin_content);
 
     var client = try DaemonClient.init(allocator);
-    defer client.deinit(allocator);
+    defer client.deinit();
 
     try client.connect();
 
     const request = protocol.Request{
         .prompt = user_prompt,
         .stdin = stdin_content,
-        .max_tokens = 10240,
+        .max_tokens = 1024,
     };
 
     try client.sendRequest(request);

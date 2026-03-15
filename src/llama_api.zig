@@ -72,6 +72,7 @@ pub extern fn llama_model_load_from_file(path: [*:0]const u8, params: ModelParam
 pub extern fn llama_free_model(model: *Model) void;
 
 pub extern fn llama_new_context_with_model(model: *Model, params: ContextParams) ?*Context;
+pub extern fn llama_init_from_model(model: *Model, params: ContextParams) ?*Context;
 pub extern fn llama_free(ctx: *Context) void;
 
 pub extern fn llama_model_default_params() ModelParams;
@@ -130,6 +131,7 @@ pub const Batch = extern struct {
 };
 
 pub extern fn llama_batch_init(n_tokens: i32, embd: i32, n_seq_max: i32) Batch;
+pub extern fn llama_batch_get_one(tokens: [*]Token, n_tokens: i32) Batch;
 pub extern fn llama_batch_free(batch: Batch) void;
 
 pub extern fn llama_decode(ctx: *Context, batch: Batch) i32;
@@ -137,8 +139,18 @@ pub extern fn llama_get_logits(ctx: *Context) [*]f32;
 
 pub extern fn llama_sampler_init_greedy() *Sampler;
 pub extern fn llama_sampler_init_dist(seed: u32) *Sampler;
+pub extern fn llama_sampler_init_temp(t: f32) *Sampler;
+pub extern fn llama_sampler_init_min_p(p: f32, min_keep: usize) *Sampler;
 pub extern fn llama_sampler_sample(smpl: *Sampler, ctx: *Context, idx: i32) Token;
 pub extern fn llama_sampler_free(smpl: *Sampler) void;
+
+pub const SamplerChainParams = extern struct {
+    no_perf: bool,
+};
+
+pub extern fn llama_sampler_chain_default_params() SamplerChainParams;
+pub extern fn llama_sampler_chain_init(params: SamplerChainParams) *Sampler;
+pub extern fn llama_sampler_chain_add(chain: *Sampler, smpl: *Sampler) void;
 
 pub extern fn llama_backend_init() void;
 pub extern fn llama_backend_free() void;
@@ -162,7 +174,7 @@ pub fn countTokens(vocab: *Vocab, text: []const u8) i32 {
         null,
         0,
         false,
-        false,
+        true,
     );
     return -result;
 }
@@ -186,7 +198,7 @@ pub fn tokenize(
         tokens.ptr,
         n_tokens,
         add_special,
-        false,
+        true,
     );
 
     if (result != n_tokens) {
@@ -211,49 +223,6 @@ pub fn detokenize(
     const result = try allocator.alloc(u8, @intCast(len));
     @memcpy(result, buf[0..@intCast(len)]);
     return result;
-}
-
-/// Preprocesses a chat template to hardcode enable_thinking=false
-/// This replaces Jinja conditionals that check enable_thinking with the false branch
-pub fn preprocessChatTemplate(allocator: std.mem.Allocator, template: []const u8) ![:0]const u8 {
-    // Qwen3.5 template pattern: if enable_thinking is defined and enable_thinking is false
-    // We replace this with just the false case output: '<think>\n\n</think>\n\n'
-    const false_pattern = "{{- '<think>\\n\\n</think>\\n\\n' }}";
-
-    // Simple replacement for Qwen3.5 style template
-    // Look for the pattern and replace the conditional with the false output
-    if (std.mem.indexOf(u8, template, "enable_thinking")) |start_idx| {
-        // Find the start of the if block
-        var if_start: usize = start_idx;
-        while (if_start > 0) {
-            if_start -= 1;
-            if (std.mem.startsWith(u8, template[if_start..], "{%- if")) {
-                break;
-            }
-            if (if_start == 0) break;
-        }
-
-        // Find the end of the endif block
-        const endif_pattern = "{%- endif %}";
-        if (std.mem.indexOf(u8, template[start_idx..], endif_pattern)) |endif_rel| {
-            const endif_end = start_idx + endif_rel + endif_pattern.len;
-
-            // Build new template with replacement (null-terminated)
-            const new_len = if_start + false_pattern.len + (template.len - endif_end);
-            const new_template = try allocator.alloc(u8, new_len + 1);
-
-            // Copy parts: before if + replacement + after endif
-            @memcpy(new_template[0..if_start], template[0..if_start]);
-            @memcpy(new_template[if_start .. if_start + false_pattern.len], false_pattern);
-            @memcpy(new_template[if_start + false_pattern.len .. new_len], template[endif_end..]);
-            new_template[new_len] = 0; // null terminator
-
-            return new_template[0..new_len :0];
-        }
-    }
-
-    // No modification needed, return null-terminated copy of original
-    return try allocator.dupeZ(u8, template);
 }
 
 pub const ModelHandle = struct {
@@ -301,15 +270,8 @@ pub const ModelHandle = struct {
     ) ![]const u8 {
         const tmpl = llama_model_chat_template(self.model, null);
 
-        // Preprocess template to disable thinking
-        const tmpl_str = if (tmpl) |t| std.mem.span(t) else "";
-        const processed_tmpl = try preprocessChatTemplate(allocator, tmpl_str);
-        defer if (tmpl != null) allocator.free(processed_tmpl);
-
-        const tmpl_to_use = if (tmpl != null) processed_tmpl.ptr else null;
-
         const max_len: usize = @intCast(llama_chat_apply_template(
-            tmpl_to_use,
+            tmpl,
             messages.ptr,
             messages.len,
             add_assistant,
@@ -323,7 +285,7 @@ pub const ModelHandle = struct {
         errdefer allocator.free(buf);
 
         const result = llama_chat_apply_template(
-            tmpl_to_use,
+            tmpl,
             messages.ptr,
             messages.len,
             add_assistant,
@@ -336,8 +298,7 @@ pub const ModelHandle = struct {
             return error.ChatTemplateFailed;
         }
 
-        const result_slice = buf[0..@as(usize, @intCast(result))];
-        return result_slice;
+        return buf[0..@as(usize, @intCast(result))];
     }
 };
 
@@ -355,7 +316,7 @@ pub const ContextHandle = struct {
         params.n_threads_batch = @intCast(n_threads);
         params.flash_attn_type = if (flash_attn) 1 else 0;
 
-        const ctx = llama_new_context_with_model(model.model, params) orelse return error.ContextCreateFailed;
+        const ctx = llama_init_from_model(model.model, params) orelse return error.ContextCreateFailed;
         return ContextHandle{
             .ctx = ctx,
             .model = model,

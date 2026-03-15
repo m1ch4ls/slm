@@ -303,7 +303,7 @@ pub fn main() !void {
     log.info("  Threads: {d}", .{n_threads});
 
     // Create inference engine
-    var engine = inference.InferenceEngine.init(allocator, &model, &ctx);
+    var engine = inference.InferenceEngine.init(allocator, &model, &ctx, null);
 
     // Define benchmark prompts
     const Prompt = struct {

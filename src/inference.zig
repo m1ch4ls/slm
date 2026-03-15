@@ -53,12 +53,14 @@ pub const InferenceEngine = struct {
     allocator: std.mem.Allocator,
     chat_template: ?[*:0]const u8,
     n_batch: u32,
+    system_prompt: ?[*:0]const u8,
 
     /// Initialize inference engine with model and context
     pub fn init(
         allocator: std.mem.Allocator,
         model: *llama.ModelHandle,
         ctx: *llama.ContextHandle,
+        system_prompt: ?[*:0]const u8,
     ) InferenceEngine {
         const n_ctx = llama.llama_n_ctx(ctx.ctx);
         return .{
@@ -68,6 +70,7 @@ pub const InferenceEngine = struct {
             .allocator = allocator,
             .chat_template = model.getChatTemplate(),
             .n_batch = @min(n_ctx, 2048),
+            .system_prompt = system_prompt,
         };
     }
 
@@ -109,18 +112,24 @@ pub const InferenceEngine = struct {
         try self.decodeInitialBatch(tokens);
 
         // Setup sampling
-        const sampler = if (options.temperature) |_|
-            llama.llama_sampler_init_dist(options.seed)
-        else
-            llama.llama_sampler_init_greedy();
+        var sparams = llama.llama_sampler_chain_default_params();
+        sparams.no_perf = true;
+        const sampler = llama.llama_sampler_chain_init(sparams);
         defer llama.llama_sampler_free(sampler);
 
+        if (options.temperature) |temp| {
+            llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_min_p(0.05, 1));
+            llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_temp(temp));
+            llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_dist(options.seed));
+        } else {
+            llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_greedy());
+        }
+
         // Setup think filter
-        var filter = try think_filter.ThinkFilter.init(self.allocator);
-        defer filter.deinit();
+        //var filter = try think_filter.ThinkFilter.init(self.allocator);
+        //defer filter.deinit();
 
         var generated_tokens: u32 = 0;
-        var pos: i32 = @intCast(tokens.len);
 
         var stopped_by_eos = false;
         var hit_token_limit = false;
@@ -142,39 +151,48 @@ pub const InferenceEngine = struct {
             const token_text = try llama.detokenize(self.allocator, self.vocab, new_token);
             defer self.allocator.free(token_text);
 
+            log.debug("Sampled text: {s}", .{token_text});
+
             // Apply think filter
-            const chunks_to_emit = try filter.process(self.allocator, token_text);
-            defer {
-                for (chunks_to_emit) |chunk| {
-                    self.allocator.free(chunk);
-                }
-                self.allocator.free(chunks_to_emit);
-            }
+            // const chunks_to_emit = try filter.process(self.allocator, token_text);
+            // defer {
+            //     for (chunks_to_emit) |chunk| {
+            //         self.allocator.free(chunk);
+            //     }
+            //     self.allocator.free(chunks_to_emit);
+            // }
 
             // Emit chunks via callback
-            for (chunks_to_emit) |chunk| {
-                if (chunk.len > 0) {
-                    continue_generation = callback(chunk, userdata);
-                    if (!continue_generation) break;
-                }
-            }
+            // for (chunks_to_emit) |chunk| {
+            //     if (chunk.len > 0) {
+            //         continue_generation = callback(chunk, userdata);
+            //         if (!continue_generation) break;
+            //     }
+            // }
+            continue_generation = callback(token_text, userdata);
+            if (!continue_generation) break;
 
-            // Decode next token
-            try self.decodeSingleToken(new_token, pos);
-            pos += 1;
+            // Decode next token (position tracked automatically)
+            var token_arr = [_]llama.Token{new_token};
+            const batch = llama.llama_batch_get_one(&token_arr, 1);
+            const decode_result = llama.llama_decode(self.ctx.ctx, batch);
+            if (decode_result != 0) {
+                log.err("llama_decode failed for generated token with code {d}", .{decode_result});
+                return InferenceError.DecodeFailed;
+            }
         }
 
         if (generated_tokens >= options.max_tokens) {
             hit_token_limit = true;
         }
 
-        // Flush remaining content
-        if (continue_generation) {
-            if (try filter.flush(self.allocator)) |remaining| {
-                defer self.allocator.free(remaining);
-                _ = callback(remaining, userdata);
-            }
-        }
+        // // Flush remaining content
+        // if (continue_generation) {
+        //     if (try filter.flush(self.allocator)) |remaining| {
+        //         defer self.allocator.free(remaining);
+        //         _ = callback(remaining, userdata);
+        //     }
+        // }
 
         const elapsed_ms = @as(u64, @intCast(std.time.milliTimestamp() - start_time));
         const tokens_per_second = if (elapsed_ms > 0)
@@ -205,8 +223,9 @@ pub const InferenceEngine = struct {
         // Truncate stdin to fit within context budget
         const effective_stdin = if (has_stdin) blk: {
             const n_ctx = llama.llama_n_ctx(self.ctx.ctx);
+            //const system_prompt_tokens = if (self.system_prompt) |sp| tokenizer.countTokensExact(self.vocab, std.mem.span(sp)) else 0;
             const prompt_tokens = tokenizer.countTokensExact(self.vocab, prompt);
-            const template_overhead: usize = 100;
+            const template_overhead: usize = 5000;
             const max_stdin_tokens = tokenizer.computeStdinBudget(n_ctx, prompt_tokens, max_gen_tokens, template_overhead);
 
             log.debug("Token budget: n_ctx={d}, prompt={d}, gen={d}, overhead={d}, stdin_budget={d}", .{
@@ -223,7 +242,7 @@ pub const InferenceEngine = struct {
         if (self.chat_template != null) {
             // Use chat template formatting
             const user_content = if (effective_has_stdin)
-                try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ prompt, effective_stdin })
+                try std.fmt.allocPrint(self.allocator, "<instructions>{s}</instructions>\n\n<input>{s}</input>", .{ prompt, effective_stdin })
             else
                 try self.allocator.dupe(u8, prompt);
             defer self.allocator.free(user_content);
@@ -231,14 +250,20 @@ pub const InferenceEngine = struct {
             const user_content_z = try self.allocator.dupeZ(u8, user_content);
             defer self.allocator.free(user_content_z);
 
-            const role_z = "user";
-            const messages = [_]llama.ChatMessage{
-                .{ .role = role_z.ptr, .content = user_content_z.ptr },
-            };
+            // Build messages array with optional system prompt
+            var messages: [2]llama.ChatMessage = undefined;
+            var msg_count: usize = 0;
+
+            if (self.system_prompt) |sp| {
+                messages[0] = .{ .role = "system", .content = sp };
+                msg_count += 1;
+            }
+            messages[msg_count] = .{ .role = "user", .content = user_content_z.ptr };
+            msg_count += 1;
 
             return try self.model.applyChatTemplate(
                 self.allocator,
-                &messages,
+                messages[0..msg_count],
                 true, // Add assistant marker
             );
         } else {
@@ -259,22 +284,13 @@ pub const InferenceEngine = struct {
         while (offset < tokens.len) {
             const remaining = tokens.len - offset;
             const chunk_len = @min(remaining, batch_size);
-            const is_last_chunk = (offset + chunk_len) >= tokens.len;
 
-            var batch = llama.llama_batch_init(@intCast(chunk_len), 0, 1);
-            defer llama.llama_batch_free(batch);
-
-            for (0..chunk_len) |i| {
-                batch.token[i] = tokens[offset + i];
-                batch.pos[i] = @intCast(offset + i);
-                batch.n_seq_id[i] = 1;
-                batch.seq_id[i][0] = 0;
-                if (batch.logits) |logits| {
-                    // Only compute logits for last token of the last chunk
-                    logits[i] = if (is_last_chunk and i == chunk_len - 1) 1 else 0;
-                }
-            }
-            batch.n_tokens = @intCast(chunk_len);
+            // Use llama_batch_get_one for automatic position tracking
+            // Need a mutable copy of the token slice for this chunk
+            const batch = llama.llama_batch_get_one(
+                @constCast(tokens[offset..].ptr),
+                @intCast(chunk_len),
+            );
 
             const decode_result = llama.llama_decode(self.ctx.ctx, batch);
             if (decode_result != 0) {
@@ -284,22 +300,5 @@ pub const InferenceEngine = struct {
 
             offset += chunk_len;
         }
-    }
-
-    /// Decode a single generated token
-    fn decodeSingleToken(self: *InferenceEngine, token: llama.Token, pos: i32) InferenceError!void {
-        var batch = llama.llama_batch_init(1, 0, 1);
-        defer llama.llama_batch_free(batch);
-
-        batch.token[0] = token;
-        batch.pos[0] = pos;
-        batch.n_seq_id[0] = 1;
-        batch.seq_id[0][0] = 0;
-        if (batch.logits) |logits| {
-            logits[0] = 1;
-        }
-        batch.n_tokens = 1;
-
-        _ = llama.llama_decode(self.ctx.ctx, batch);
     }
 };

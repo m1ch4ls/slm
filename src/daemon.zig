@@ -7,6 +7,10 @@ const posix = std.posix;
 
 const log = std.log.scoped(.daemon);
 
+const DEFAULT_SYSTEM_PROMPT = "You recive user instructions in <instructions> and optional input in <input> tag. Apply the user instructions literaly or say that you cannot do it." ++
+"Your audience is a large language model - LLM. Do not tailor answers for human. " ++
+"Provide short terse responses in about 100 words, unless you are specifically asked for more details.";
+
 var shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 fn signalHandler(sig: c_int) callconv(.c) void {
@@ -308,7 +312,7 @@ pub const Daemon = struct {
         var token_buffer = protocol.TokenBuffer.init(file);
 
         // Create inference engine
-        var engine = inference.InferenceEngine.init(self.allocator, &self.model, &self.ctx);
+        var engine = inference.InferenceEngine.init(self.allocator, &self.model, &self.ctx, DEFAULT_SYSTEM_PROMPT);
 
         // Setup callback context for writing to token buffer
         var callback_ctx = TokenBufferCallbackContext{
