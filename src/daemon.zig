@@ -318,8 +318,6 @@ pub const Daemon = struct {
 
         const options = inference.InferenceOptions{
             .max_tokens = request.max_tokens,
-            .use_chat_template = self.chat_template != null,
-            .filter_think_blocks = true,
         };
 
         // Run inference

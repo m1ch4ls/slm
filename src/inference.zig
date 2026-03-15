@@ -17,10 +17,6 @@ pub const InferenceError = error{
 pub const InferenceOptions = struct {
     /// Maximum tokens to generate
     max_tokens: u32 = 512,
-    /// Whether to use chat template formatting
-    use_chat_template: bool = true,
-    /// Whether to filter think blocks from output
-    filter_think_blocks: bool = true,
     /// Temperature for sampling (if null, uses greedy)
     temperature: ?f32 = null,
     /// Random seed for sampling (only used with temperature)
@@ -94,7 +90,7 @@ pub const InferenceEngine = struct {
         }
 
         // Format prompt
-        const formatted_prompt = try self.formatPrompt(prompt, stdin, options.use_chat_template, options.max_tokens);
+        const formatted_prompt = try self.formatPrompt(prompt, stdin, options.max_tokens);
         defer self.allocator.free(formatted_prompt);
 
         log.debug("Formatted prompt ({d} bytes): {s}", .{
@@ -119,12 +115,9 @@ pub const InferenceEngine = struct {
             llama.llama_sampler_init_greedy();
         defer llama.llama_sampler_free(sampler);
 
-        // Setup think filter if enabled
-        var filter: ?think_filter.ThinkFilter = null;
-        if (options.filter_think_blocks) {
-            filter = try think_filter.ThinkFilter.init(self.allocator);
-        }
-        defer if (filter) |*f| f.deinit();
+        // Setup think filter
+        var filter = try think_filter.ThinkFilter.init(self.allocator);
+        defer filter.deinit();
 
         var generated_tokens: u32 = 0;
         var pos: i32 = @intCast(tokens.len);
@@ -149,15 +142,8 @@ pub const InferenceEngine = struct {
             const token_text = try llama.detokenize(self.allocator, self.vocab, new_token);
             defer self.allocator.free(token_text);
 
-            // Apply think filter if enabled
-            const chunks_to_emit = if (filter) |*f|
-                try f.process(self.allocator, token_text)
-            else blk: {
-                const chunk = try self.allocator.dupe(u8, token_text);
-                const arr = try self.allocator.alloc([]const u8, 1);
-                arr[0] = chunk;
-                break :blk arr;
-            };
+            // Apply think filter
+            const chunks_to_emit = try filter.process(self.allocator, token_text);
             defer {
                 for (chunks_to_emit) |chunk| {
                     self.allocator.free(chunk);
@@ -184,11 +170,9 @@ pub const InferenceEngine = struct {
 
         // Flush remaining content
         if (continue_generation) {
-            if (filter) |*f| {
-                if (try f.flush(self.allocator)) |remaining| {
-                    defer self.allocator.free(remaining);
-                    _ = callback(remaining, userdata);
-                }
+            if (try filter.flush(self.allocator)) |remaining| {
+                defer self.allocator.free(remaining);
+                _ = callback(remaining, userdata);
             }
         }
 
@@ -209,12 +193,11 @@ pub const InferenceEngine = struct {
         };
     }
 
-    /// Format prompt with or without chat template
+    /// Format prompt using chat template if available
     fn formatPrompt(
         self: *InferenceEngine,
         prompt: []const u8,
         stdin: []const u8,
-        use_chat_template: bool,
         max_gen_tokens: u32,
     ) ![]const u8 {
         const has_stdin = stdin.len > 0;
@@ -237,7 +220,7 @@ pub const InferenceEngine = struct {
 
         const effective_has_stdin = effective_stdin.len > 0;
 
-        if (use_chat_template and self.chat_template != null) {
+        if (self.chat_template != null) {
             // Use chat template formatting
             const user_content = if (effective_has_stdin)
                 try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ prompt, effective_stdin })

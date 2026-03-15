@@ -119,8 +119,6 @@ fn runBenchmark(
 
     const options = inference.InferenceOptions{
         .max_tokens = max_tokens,
-        .use_chat_template = true,
-        .filter_think_blocks = true,
     };
 
     const start = std.time.milliTimestamp();
