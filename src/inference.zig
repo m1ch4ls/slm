@@ -126,8 +126,8 @@ pub const InferenceEngine = struct {
         }
 
         // Setup think filter
-        //var filter = try think_filter.ThinkFilter.init(self.allocator);
-        //defer filter.deinit();
+        var filter = try think_filter.ThinkFilter.init(self.allocator);
+        defer filter.deinit();
 
         var generated_tokens: u32 = 0;
 
@@ -154,23 +154,21 @@ pub const InferenceEngine = struct {
             log.debug("Sampled text: {s}", .{token_text});
 
             // Apply think filter
-            // const chunks_to_emit = try filter.process(self.allocator, token_text);
-            // defer {
-            //     for (chunks_to_emit) |chunk| {
-            //         self.allocator.free(chunk);
-            //     }
-            //     self.allocator.free(chunks_to_emit);
-            // }
+            const chunks_to_emit = try filter.process(self.allocator, token_text);
+            defer {
+                for (chunks_to_emit) |chunk| {
+                    self.allocator.free(chunk);
+                }
+                self.allocator.free(chunks_to_emit);
+            }
 
             // Emit chunks via callback
-            // for (chunks_to_emit) |chunk| {
-            //     if (chunk.len > 0) {
-            //         continue_generation = callback(chunk, userdata);
-            //         if (!continue_generation) break;
-            //     }
-            // }
-            continue_generation = callback(token_text, userdata);
-            if (!continue_generation) break;
+            for (chunks_to_emit) |chunk| {
+                if (chunk.len > 0) {
+                    continue_generation = callback(chunk, userdata);
+                    if (!continue_generation) break;
+                }
+            }
 
             // Decode next token (position tracked automatically)
             var token_arr = [_]llama.Token{new_token};
@@ -186,13 +184,13 @@ pub const InferenceEngine = struct {
             hit_token_limit = true;
         }
 
-        // // Flush remaining content
-        // if (continue_generation) {
-        //     if (try filter.flush(self.allocator)) |remaining| {
-        //         defer self.allocator.free(remaining);
-        //         _ = callback(remaining, userdata);
-        //     }
-        // }
+        // Flush remaining content from think filter
+        if (continue_generation) {
+            if (try filter.flush(self.allocator)) |remaining| {
+                defer self.allocator.free(remaining);
+                _ = callback(remaining, userdata);
+            }
+        }
 
         const elapsed_ms = @as(u64, @intCast(std.time.milliTimestamp() - start_time));
         const tokens_per_second = if (elapsed_ms > 0)

@@ -104,11 +104,14 @@ const DaemonClient = struct {
         // Read one token at a time for immediate output
         while (true) {
             const token = try protocol.readToken(file, self.allocator);
-            if (token == null) return; // End marker
+            if (token == null) break; // End marker
             defer self.allocator.free(token.?);
 
             try stdout.writeAll(token.?);
         }
+
+        // Ensure output ends with a newline for proper terminal display
+        try stdout.writeAll("\n");
     }
 };
 

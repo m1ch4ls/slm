@@ -5,12 +5,14 @@ const log = std.log.scoped(.think_filter);
 pub const ThinkFilter = struct {
     buffer: std.ArrayList(u8),
     in_think: bool,
+    strip_leading_ws: bool,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) !ThinkFilter {
         return .{
             .buffer = try std.ArrayList(u8).initCapacity(allocator, 256),
             .in_think = false,
+            .strip_leading_ws = false,
             .allocator = allocator,
         };
     }
@@ -36,7 +38,7 @@ pub const ThinkFilter = struct {
         var emit_start: usize = 0;
         var i: usize = 0;
 
-        log.debug("Filtering thorough text {s}", .{ text });
+        log.debug("Filtering thorough text {s}", .{text});
 
         while (i < self.buffer.items.len) {
             if (!self.in_think) {
@@ -58,6 +60,7 @@ pub const ThinkFilter = struct {
                 if (i + 8 <= self.buffer.items.len and std.mem.eql(u8, self.buffer.items[i .. i + 8], "</think>")) {
                     log.debug("Found </think> at i={}", .{i});
                     self.in_think = false;
+                    self.strip_leading_ws = true;
                     i += 8;
                     emit_start = i;
                 } else {
@@ -68,6 +71,19 @@ pub const ThinkFilter = struct {
 
         // Emit safe content at the end (outside think blocks only)
         if (!self.in_think and emit_start < self.buffer.items.len) {
+            // Strip leading whitespace after think block
+            if (self.strip_leading_ws) {
+                while (emit_start < self.buffer.items.len and
+                    (self.buffer.items[emit_start] == '\n' or self.buffer.items[emit_start] == '\r' or
+                        self.buffer.items[emit_start] == ' ' or self.buffer.items[emit_start] == '\t'))
+                {
+                    emit_start += 1;
+                }
+                if (emit_start < self.buffer.items.len) {
+                    self.strip_leading_ws = false;
+                }
+            }
+
             // Hold back any suffix that could be a prefix of "<think>" or "</think>"
             const safe_end = partialTagSafeEnd(self.buffer.items, emit_start);
 
@@ -154,7 +170,7 @@ test "filters think blocks" {
     for (chunks) |chunk| {
         try result.appendSlice(allocator, chunk);
     }
-    try std.testing.expectEqualStrings("Hello  World", result.items);
+    try std.testing.expectEqualStrings("Hello World", result.items);
 }
 
 test "handles no think tags" {
@@ -366,6 +382,37 @@ test "flush discards unclosed think block" {
 
     const remaining = try filter.flush(allocator);
     try std.testing.expectEqual(null, remaining);
+}
+
+test "token-by-token streaming with think block" {
+    const allocator = std.testing.allocator;
+    var filter = try ThinkFilter.init(allocator);
+    defer filter.deinit();
+
+    var all_output = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer all_output.deinit(allocator);
+
+    // Simulate exact daemon token stream: <think>\n\n</think>\n\nHello! How can I help you today?
+    const tokens = &[_][]const u8{ "<think>", "\n", "\n", "</think>", "\n", "\n", "Hello", "!", " How", " can", " I", " help", " you", " today", "?" };
+
+    for (tokens) |token| {
+        const chunks = try filter.process(allocator, token);
+        defer {
+            for (chunks) |c| allocator.free(c);
+            allocator.free(chunks);
+        }
+        for (chunks) |c| {
+            try all_output.appendSlice(allocator, c);
+        }
+    }
+
+    // Flush remaining
+    if (try filter.flush(allocator)) |remaining| {
+        defer allocator.free(remaining);
+        try all_output.appendSlice(allocator, remaining);
+    }
+
+    try std.testing.expectEqualStrings("Hello! How can I help you today?", all_output.items);
 }
 
 test "long text after think block does not overflow" {

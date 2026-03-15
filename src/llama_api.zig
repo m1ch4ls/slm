@@ -281,7 +281,8 @@ pub const ModelHandle = struct {
 
         if (max_len < 0) return error.ChatTemplateFailed;
 
-        const buf = try allocator.alloc(u8, @intCast(max_len));
+        const no_think_suffix = "<think>\n</think>\n\n";
+        const buf = try allocator.alloc(u8, @as(usize, @intCast(max_len)) + no_think_suffix.len);
         errdefer allocator.free(buf);
 
         const result = llama_chat_apply_template(
@@ -298,7 +299,9 @@ pub const ModelHandle = struct {
             return error.ChatTemplateFailed;
         }
 
-        return buf[0..@as(usize, @intCast(result))];
+        const template_len = @as(usize, @intCast(result));
+        @memcpy(buf[template_len..][0..no_think_suffix.len], no_think_suffix);
+        return buf[0 .. template_len + no_think_suffix.len];
     }
 };
 
