@@ -75,9 +75,11 @@ pub fn readConfig(allocator: std.mem.Allocator) !Config {
 
         var parts = std.mem.splitScalar(u8, trimmed, '=');
         const key = std.mem.trim(u8, parts.next() orelse continue, " \t");
-        const value = std.mem.trim(u8, parts.next() orelse continue, " \t");
+        const value = std.mem.trim(u8, parts.rest(), " \t");
+        if (value.len == 0) continue;
 
         if (std.mem.eql(u8, key, "model")) {
+            if (model_path) |old| allocator.free(old);
             model_path = try allocator.dupe(u8, value);
         } else if (std.mem.eql(u8, key, "context_size")) {
             context_size = std.fmt.parseInt(u32, value, 10) catch context_size;
@@ -112,6 +114,7 @@ pub const Daemon = struct {
     ctx: llama.ContextHandle,
     socket_path: []const u8,
     pid_path: []const u8,
+    pid_fd: ?posix.fd_t,
     allocator: std.mem.Allocator,
     chat_template: ?[*:0]const u8,
 
@@ -156,12 +159,16 @@ pub const Daemon = struct {
             .ctx = ctx,
             .socket_path = socket_path,
             .pid_path = pid_path,
+            .pid_fd = null,
             .allocator = allocator,
             .chat_template = chat_template,
         };
     }
 
     pub fn deinit(self: *Daemon) void {
+        if (self.pid_fd) |fd| {
+            posix.close(fd);
+        }
         self.ctx.deinit();
         self.model.deinit();
         self.allocator.free(self.socket_path);
@@ -175,6 +182,41 @@ pub const Daemon = struct {
             if (err != error.PathAlreadyExists) {
                 log.err("Failed to create socket directory: {}", .{err});
             }
+        };
+
+        // Acquire PID file lock to prevent multiple daemons
+        const pid_path_z = try self.allocator.dupeZ(u8, self.pid_path);
+        defer self.allocator.free(pid_path_z);
+
+        // Open without TRUNC — we must acquire the lock before clobbering
+        const pid_fd = posix.open(pid_path_z, .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+        }, 0o644) catch |err| {
+            log.err("Failed to open PID file {s}: {}", .{ self.pid_path, err });
+            return err;
+        };
+        self.pid_fd = pid_fd;
+
+        posix.flock(pid_fd, posix.LOCK.EX | posix.LOCK.NB) catch |err| {
+            if (err == error.WouldBlock) {
+                log.err("Another daemon is already running (PID file locked: {s})", .{self.pid_path});
+                return error.DaemonAlreadyRunning;
+            }
+            log.err("Failed to lock PID file: {}", .{err});
+            return err;
+        };
+
+        // Lock acquired — now truncate and write our PID
+        const pid_file = std.fs.File{ .handle = pid_fd };
+        pid_file.setEndPos(0) catch {};
+        pid_file.seekTo(0) catch {};
+        const pid = std.os.linux.getpid();
+        var pid_buf: [20]u8 = undefined;
+        const pid_str = std.fmt.bufPrint(&pid_buf, "{d}\n", .{pid}) catch unreachable;
+        pid_file.writeAll(pid_str) catch |err| {
+            log.err("Failed to write PID file: {}", .{err});
+            return err;
         };
 
         log.info("Creating null-terminated socket path", .{});
@@ -244,6 +286,7 @@ pub const Daemon = struct {
 
         log.info("Shutting down daemon", .{});
         std.posix.unlink(socket_path_z) catch {};
+        std.posix.unlink(pid_path_z) catch {};
     }
 
     fn handleClient(self: *Daemon, client_socket: std.posix.fd_t) !void {
@@ -294,6 +337,7 @@ pub const Daemon = struct {
             stats.tokens_per_second,
         });
 
+        try token_buffer.flush();
         try token_buffer.writeEndMarker();
     }
 };
@@ -339,12 +383,16 @@ pub fn main() !void {
     // Get the directory where this binary is located
     var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
 
-    const lib_path = if (std.fs.selfExeDirPath(&exe_dir_buf)) |exe_dir| blk: {
-        // Try lib/ relative to the executable
-        break :blk std.fs.path.joinZ(allocator, &[_][]const u8{ exe_dir, "lib" }) catch |err| {
+    var lib_path_allocated: ?[:0]u8 = null;
+    defer if (lib_path_allocated) |p| allocator.free(p);
+
+    const lib_path: [*:0]const u8 = if (std.fs.selfExeDirPath(&exe_dir_buf)) |exe_dir| blk: {
+        const joined = std.fs.path.joinZ(allocator, &[_][]const u8{ exe_dir, "lib" }) catch |err| {
             log.warn("Could not construct lib path: {s}", .{@errorName(err)});
             break :blk "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin";
         };
+        lib_path_allocated = joined;
+        break :blk joined;
     } else |err| blk: {
         log.warn("Could not determine executable directory: {s}", .{@errorName(err)});
         break :blk "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin";

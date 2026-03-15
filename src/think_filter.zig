@@ -66,23 +66,8 @@ pub const ThinkFilter = struct {
 
         // Emit safe content at the end (outside think blocks only)
         if (!self.in_think and emit_start < self.buffer.items.len) {
-            // Be conservative: don't emit if buffer ends with potential partial tag
-            // Scan backwards from end to find safe emission point
-            const safe_end = blk: {
-                var end = self.buffer.items.len;
-                while (end > emit_start) : (end -= 1) {
-                    const c = self.buffer.items[end - 1];
-                    if (c == '<') {
-                        // Could be start of <think> or </think>, don't emit the '<'
-                        break :blk end - 1;
-                    }
-                    if (c == '>' or std.ascii.isAlphabetic(c) or c == '/') {
-                        // We're past any potential partial tag, can emit up to here
-                        break :blk end;
-                    }
-                }
-                break :blk end;
-            };
+            // Hold back any suffix that could be a prefix of "<think>" or "</think>"
+            const safe_end = partialTagSafeEnd(self.buffer.items, emit_start);
 
             if (emit_start < safe_end) {
                 const chunk = try allocator.dupe(u8, self.buffer.items[emit_start..safe_end]);
@@ -99,6 +84,36 @@ pub const ThinkFilter = struct {
         self.buffer.shrinkRetainingCapacity(remaining);
 
         return try chunks.toOwnedSlice(allocator);
+    }
+
+    const open_tag = "<think>";
+    const close_tag = "</think>";
+
+    /// Find the safe emission boundary in buffer[emit_start..].
+    /// Returns the index up to which we can safely emit, holding back
+    /// any trailing suffix that could be a prefix of "<think>" or "</think>".
+    fn partialTagSafeEnd(buf: []const u8, emit_start: usize) usize {
+        const tail = buf[emit_start..];
+        // Check suffixes of decreasing length: could the last N bytes
+        // be the start of a tag we haven't fully received yet?
+        // Max prefix to check is max(open_tag.len, close_tag.len) - 1 = 7
+        const max_prefix = @max(open_tag.len, close_tag.len) - 1;
+        const check_len: usize = @min(tail.len, max_prefix);
+
+        var hold_back: usize = 0;
+        for (1..check_len + 1) |suffix_len| {
+            const suffix = tail[tail.len - suffix_len ..];
+            if (isTagPrefix(suffix, open_tag) or isTagPrefix(suffix, close_tag)) {
+                hold_back = suffix_len;
+            }
+        }
+        return buf.len - hold_back;
+    }
+
+    /// Check if `candidate` is a prefix of `tag`
+    fn isTagPrefix(candidate: []const u8, tag: []const u8) bool {
+        if (candidate.len > tag.len) return false;
+        return std.mem.eql(u8, candidate, tag[0..candidate.len]);
     }
 
     /// Flush any remaining content. Call at end of stream.
@@ -197,8 +212,7 @@ test "handles complete tags only" {
     var filter = try ThinkFilter.init(allocator);
     defer filter.deinit();
 
-    // When tags are complete within a single process() call, they work correctly
-    // Note: trailing space is held back by partial tag detection (space could be part of tag)
+    // Space is not a tag prefix, so "Before " is emitted fully
     const chunks1 = try filter.process(allocator, "Before ");
     defer {
         for (chunks1) |chunk| allocator.free(chunk);
@@ -211,8 +225,7 @@ test "handles complete tags only" {
         allocator.free(chunks2);
     }
 
-    // "Before" emitted (space held back), then " <think>..." processes the rest
-    try std.testing.expectEqualStrings("Before", chunks1[0]);
+    try std.testing.expectEqualStrings("Before ", chunks1[0]);
 }
 
 test "handles incomplete closing tag" {
@@ -244,21 +257,98 @@ test "flush returns remaining content" {
     var filter = try ThinkFilter.init(allocator);
     defer filter.deinit();
 
-    // "Hello " - space at end is held back by partial tag detection
+    // Space is not a tag prefix, so "Hello " is emitted fully
     const chunks = try filter.process(allocator, "Hello ");
     defer {
         for (chunks) |chunk| allocator.free(chunk);
         allocator.free(chunks);
     }
 
-    // process() emits "Hello" (space held back)
-    try std.testing.expectEqualStrings("Hello", chunks[0]);
+    try std.testing.expectEqualStrings("Hello ", chunks[0]);
 
-    // flush() returns the remaining space
+    // Nothing remaining to flush
     const remaining = try filter.flush(allocator);
     defer if (remaining) |r| allocator.free(r);
+    try std.testing.expectEqual(null, remaining);
+}
 
-    try std.testing.expectEqualStrings(" ", remaining.?);
+test "holds back partial opening tag" {
+    const allocator = std.testing.allocator;
+    var filter = try ThinkFilter.init(allocator);
+    defer filter.deinit();
+
+    // "<thi" is a prefix of "<think>", so it gets held back
+    const chunks1 = try filter.process(allocator, "Hello <thi");
+    defer {
+        for (chunks1) |chunk| allocator.free(chunk);
+        allocator.free(chunks1);
+    }
+
+    var result1 = try std.ArrayList(u8).initCapacity(allocator, 64);
+    defer result1.deinit(allocator);
+    for (chunks1) |chunk| {
+        try result1.appendSlice(allocator, chunk);
+    }
+    try std.testing.expectEqualStrings("Hello ", result1.items);
+
+    // Complete the tag, content inside is suppressed, "World" emitted
+    const chunks2 = try filter.process(allocator, "nk>secret</think>World");
+    defer {
+        for (chunks2) |chunk| allocator.free(chunk);
+        allocator.free(chunks2);
+    }
+
+    var result2 = try std.ArrayList(u8).initCapacity(allocator, 64);
+    defer result2.deinit(allocator);
+    for (chunks2) |chunk| {
+        try result2.appendSlice(allocator, chunk);
+    }
+    try std.testing.expectEqualStrings("World", result2.items);
+}
+
+test "holds back partial closing tag" {
+    const allocator = std.testing.allocator;
+    var filter = try ThinkFilter.init(allocator);
+    defer filter.deinit();
+
+    // "</thi" is a prefix of "</think>", held back while in_think
+    const chunks1 = try filter.process(allocator, "<think>secret</thi");
+    defer {
+        for (chunks1) |chunk| allocator.free(chunk);
+        allocator.free(chunks1);
+    }
+    try std.testing.expectEqual(@as(usize, 0), chunks1.len);
+
+    const chunks2 = try filter.process(allocator, "nk>visible");
+    defer {
+        for (chunks2) |chunk| allocator.free(chunk);
+        allocator.free(chunks2);
+    }
+    try std.testing.expectEqualStrings("visible", chunks2[0]);
+}
+
+test "lone < at end is held back" {
+    const allocator = std.testing.allocator;
+    var filter = try ThinkFilter.init(allocator);
+    defer filter.deinit();
+
+    const chunks = try filter.process(allocator, "Hello<");
+    defer {
+        for (chunks) |chunk| allocator.free(chunk);
+        allocator.free(chunks);
+    }
+
+    var result = try std.ArrayList(u8).initCapacity(allocator, 64);
+    defer result.deinit(allocator);
+    for (chunks) |chunk| {
+        try result.appendSlice(allocator, chunk);
+    }
+    try std.testing.expectEqualStrings("Hello", result.items);
+
+    // Turns out it wasn't a think tag — flush emits the held-back "<"
+    const remaining = try filter.flush(allocator);
+    defer if (remaining) |r| allocator.free(r);
+    try std.testing.expectEqualStrings("<", remaining.?);
 }
 
 test "flush discards unclosed think block" {
@@ -274,4 +364,46 @@ test "flush discards unclosed think block" {
 
     const remaining = try filter.flush(allocator);
     try std.testing.expectEqual(null, remaining);
+}
+
+test "long text after think block does not overflow" {
+    const allocator = std.testing.allocator;
+    var filter = try ThinkFilter.init(allocator);
+    defer filter.deinit();
+
+    // Simulate streaming: <think> token, content, </think> token, then long text
+    const c1 = try filter.process(allocator, "<think>");
+    defer {
+        for (c1) |c| allocator.free(c);
+        allocator.free(c1);
+    }
+    try std.testing.expectEqual(@as(usize, 0), c1.len);
+
+    const c2 = try filter.process(allocator, "reasoning\n");
+    defer {
+        for (c2) |c| allocator.free(c);
+        allocator.free(c2);
+    }
+    try std.testing.expectEqual(@as(usize, 0), c2.len);
+
+    const c3 = try filter.process(allocator, "</think>");
+    defer {
+        for (c3) |c| allocator.free(c);
+        allocator.free(c3);
+    }
+
+    // Text longer than max tag prefix (7 chars) to trigger check_len == 7
+    const c4 = try filter.process(allocator, "This is a long response about quantum computing");
+    defer {
+        for (c4) |c| allocator.free(c);
+        allocator.free(c4);
+    }
+
+    var result = try std.ArrayList(u8).initCapacity(allocator, 256);
+    defer result.deinit(allocator);
+    for (c4) |chunk| {
+        try result.appendSlice(allocator, chunk);
+    }
+    // Should emit most of the text (holding back potential tag prefix at end)
+    try std.testing.expect(result.items.len > 0);
 }

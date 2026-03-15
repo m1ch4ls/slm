@@ -16,8 +16,6 @@ pub const InferenceError = error{
 pub const InferenceOptions = struct {
     /// Maximum tokens to generate
     max_tokens: u32 = 512,
-    /// Antiprompts that trigger stopping when detected in output
-    antiprompts: []const []const u8 = &[_][]const u8{"<|im_start|>"},
     /// Whether to use chat template formatting
     use_chat_template: bool = true,
     /// Whether to filter think blocks from output
@@ -40,8 +38,6 @@ pub const GenerationStats = struct {
     elapsed_ms: u64,
     /// Tokens per second
     tokens_per_second: f64,
-    /// Whether generation was stopped by antiprompt
-    stopped_by_antiprompt: bool,
     /// Whether generation was stopped by EOS
     stopped_by_eos: bool,
     /// Whether generation hit max_tokens limit
@@ -128,10 +124,7 @@ pub const InferenceEngine = struct {
 
         var generated_tokens: u32 = 0;
         var pos: i32 = @intCast(tokens.len);
-        var output_buffer = try std.ArrayList(u8).initCapacity(self.allocator, 1024);
-        defer output_buffer.deinit(self.allocator);
 
-        var stopped_by_antiprompt = false;
         var stopped_by_eos = false;
         var hit_token_limit = false;
         var continue_generation = true;
@@ -151,19 +144,6 @@ pub const InferenceEngine = struct {
             // Detokenize
             const token_text = try llama.detokenize(self.allocator, self.vocab, new_token);
             defer self.allocator.free(token_text);
-
-            // Check antiprompts
-            if (try self.checkAntiprompts(
-                token_text,
-                &output_buffer,
-                options.antiprompts,
-                callback,
-                userdata,
-            )) |result| {
-                stopped_by_antiprompt = true;
-                continue_generation = result;
-                break;
-            }
 
             // Apply think filter if enabled
             const chunks_to_emit = if (filter) |*f|
@@ -220,7 +200,6 @@ pub const InferenceEngine = struct {
             .total_tokens = tokens.len + generated_tokens,
             .elapsed_ms = elapsed_ms,
             .tokens_per_second = tokens_per_second,
-            .stopped_by_antiprompt = stopped_by_antiprompt,
             .stopped_by_eos = stopped_by_eos,
             .hit_token_limit = hit_token_limit,
         };
@@ -307,36 +286,5 @@ pub const InferenceEngine = struct {
         batch.n_tokens = 1;
 
         _ = llama.llama_decode(self.ctx.ctx, batch);
-    }
-
-    /// Check if antiprompts are detected in output
-    /// Returns null if no antiprompt detected, or optional bool for whether to continue
-    fn checkAntiprompts(
-        self: *InferenceEngine,
-        token_text: []const u8,
-        output_buffer: *std.ArrayList(u8),
-        antiprompts: []const []const u8,
-        callback: TokenCallback,
-        userdata: ?*anyopaque,
-    ) !?bool {
-        try output_buffer.appendSlice(self.allocator, token_text);
-        const recent_output = output_buffer.items;
-
-        for (antiprompts) |antiprompt| {
-            if (recent_output.len >= antiprompt.len) {
-                const end_slice = recent_output[recent_output.len - antiprompt.len ..];
-                if (std.mem.eql(u8, end_slice, antiprompt)) {
-                    log.debug("Detected antiprompt '{s}' in output, stopping generation", .{antiprompt});
-                    // Don't emit the antiprompt itself
-                    const content_to_emit = recent_output[0 .. recent_output.len - antiprompt.len];
-                    if (content_to_emit.len > 0) {
-                        _ = callback(content_to_emit, userdata);
-                    }
-                    return false; // Stop generation
-                }
-            }
-        }
-
-        return null; // No antiprompt detected
     }
 };

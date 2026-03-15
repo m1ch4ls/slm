@@ -202,8 +202,10 @@ pub fn detokenize(
     vocab: *Vocab,
     token: Token,
 ) ![]u8 {
-    var buf: [64]u8 = undefined;
-    const len = llama_token_to_piece(vocab, token, &buf, buf.len, 0, false);
+    var buf: [128]u8 = undefined;
+    // special: true so that special tokens (e.g. <think>, </think>) produce
+    // their text representation instead of empty strings
+    const len = llama_token_to_piece(vocab, token, &buf, buf.len, 0, true);
     if (len < 0) return error.DetokenizationFailed;
 
     const result = try allocator.alloc(u8, @intCast(len));
