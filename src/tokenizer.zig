@@ -19,6 +19,21 @@ pub const TokenBudget = struct {
     }
 };
 
+/// Compute max tokens available for stdin content given context constraints.
+/// Returns 0 if no room is available (prompt + generation + overhead exceed context).
+pub fn computeStdinBudget(
+    n_ctx: u32,
+    prompt_tokens: usize,
+    max_gen_tokens: u32,
+    template_overhead: usize,
+) usize {
+    const reserved = prompt_tokens + template_overhead + @as(usize, max_gen_tokens);
+    return if (n_ctx > reserved)
+        n_ctx - @as(u32, @intCast(reserved))
+    else
+        0;
+}
+
 pub fn countTokensExact(vocab: *llama.Vocab, text: []const u8) usize {
     const n = llama.countTokens(vocab, text);
     if (n <= 0) return 0;
@@ -158,4 +173,52 @@ test "TokenBudget.availableForStdin - small context" {
 
     const available = budget.availableForStdin();
     try std.testing.expectEqual(@as(i64, 402), available);
+}
+
+test "computeStdinBudget - normal case with room for stdin" {
+    // 32k context, 10 prompt tokens, 512 gen tokens, 100 overhead
+    // budget = 32768 - 10 - 512 - 100 = 32146
+    const budget = computeStdinBudget(32768, 10, 512, 100);
+    try std.testing.expectEqual(@as(usize, 32146), budget);
+}
+
+test "computeStdinBudget - large generation reserve" {
+    // 32k context, 50 prompt tokens, 10240 gen tokens, 100 overhead
+    // budget = 32768 - 50 - 10240 - 100 = 22378
+    const budget = computeStdinBudget(32768, 50, 10240, 100);
+    try std.testing.expectEqual(@as(usize, 22378), budget);
+}
+
+test "computeStdinBudget - no room left returns zero" {
+    // 4096 context, 2000 prompt tokens, 2000 gen tokens, 100 overhead
+    // reserved = 4100 > 4096, so 0
+    const budget = computeStdinBudget(4096, 2000, 2000, 100);
+    try std.testing.expectEqual(@as(usize, 0), budget);
+}
+
+test "computeStdinBudget - exactly full returns zero" {
+    // reserved = 100 + 512 + 100 = 712, context = 712
+    const budget = computeStdinBudget(712, 100, 512, 100);
+    try std.testing.expectEqual(@as(usize, 0), budget);
+}
+
+test "computeStdinBudget - one token of room" {
+    const budget = computeStdinBudget(713, 100, 512, 100);
+    try std.testing.expectEqual(@as(usize, 1), budget);
+}
+
+test "computeStdinBudget - small context overwhelmed by gen tokens" {
+    // 2048 context but requesting 4096 generation tokens
+    const budget = computeStdinBudget(2048, 10, 4096, 100);
+    try std.testing.expectEqual(@as(usize, 0), budget);
+}
+
+test "computeStdinBudget - zero prompt tokens" {
+    const budget = computeStdinBudget(8192, 0, 512, 100);
+    try std.testing.expectEqual(@as(usize, 7580), budget);
+}
+
+test "computeStdinBudget - zero gen tokens" {
+    const budget = computeStdinBudget(4096, 50, 0, 100);
+    try std.testing.expectEqual(@as(usize, 3946), budget);
 }

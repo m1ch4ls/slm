@@ -1,6 +1,7 @@
 const std = @import("std");
 const llama = @import("llama_api.zig");
 const think_filter = @import("think_filter.zig");
+const tokenizer = @import("tokenizer.zig");
 
 const log = std.log.scoped(.inference);
 
@@ -55,6 +56,7 @@ pub const InferenceEngine = struct {
     vocab: *llama.Vocab,
     allocator: std.mem.Allocator,
     chat_template: ?[*:0]const u8,
+    n_batch: u32,
 
     /// Initialize inference engine with model and context
     pub fn init(
@@ -62,12 +64,14 @@ pub const InferenceEngine = struct {
         model: *llama.ModelHandle,
         ctx: *llama.ContextHandle,
     ) InferenceEngine {
+        const n_ctx = llama.llama_n_ctx(ctx.ctx);
         return .{
             .model = model,
             .ctx = ctx,
             .vocab = model.vocab,
             .allocator = allocator,
             .chat_template = model.getChatTemplate(),
+            .n_batch = @min(n_ctx, 2048),
         };
     }
 
@@ -90,7 +94,7 @@ pub const InferenceEngine = struct {
         }
 
         // Format prompt
-        const formatted_prompt = try self.formatPrompt(prompt, stdin, options.use_chat_template);
+        const formatted_prompt = try self.formatPrompt(prompt, stdin, options.use_chat_template, options.max_tokens);
         defer self.allocator.free(formatted_prompt);
 
         log.debug("Formatted prompt ({d} bytes): {s}", .{
@@ -211,13 +215,32 @@ pub const InferenceEngine = struct {
         prompt: []const u8,
         stdin: []const u8,
         use_chat_template: bool,
+        max_gen_tokens: u32,
     ) ![]const u8 {
         const has_stdin = stdin.len > 0;
 
+        // Truncate stdin to fit within context budget
+        const effective_stdin = if (has_stdin) blk: {
+            const n_ctx = llama.llama_n_ctx(self.ctx.ctx);
+            const prompt_tokens = tokenizer.countTokensExact(self.vocab, prompt);
+            const template_overhead: usize = 100;
+            const max_stdin_tokens = tokenizer.computeStdinBudget(n_ctx, prompt_tokens, max_gen_tokens, template_overhead);
+
+            log.debug("Token budget: n_ctx={d}, prompt={d}, gen={d}, overhead={d}, stdin_budget={d}", .{
+                n_ctx, prompt_tokens, max_gen_tokens, template_overhead, max_stdin_tokens,
+            });
+
+            if (max_stdin_tokens == 0) break :blk try self.allocator.dupe(u8, "");
+            break :blk try tokenizer.truncateForTokenBudget(self.allocator, self.vocab, stdin, max_stdin_tokens);
+        } else try self.allocator.dupe(u8, stdin);
+        defer self.allocator.free(effective_stdin);
+
+        const effective_has_stdin = effective_stdin.len > 0;
+
         if (use_chat_template and self.chat_template != null) {
             // Use chat template formatting
-            const user_content = if (has_stdin)
-                try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ prompt, stdin })
+            const user_content = if (effective_has_stdin)
+                try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ prompt, effective_stdin })
             else
                 try self.allocator.dupe(u8, prompt);
             defer self.allocator.free(user_content);
@@ -237,8 +260,8 @@ pub const InferenceEngine = struct {
             );
         } else {
             // Raw prompt formatting
-            if (has_stdin) {
-                return try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ prompt, stdin });
+            if (effective_has_stdin) {
+                return try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ prompt, effective_stdin });
             } else {
                 return try self.allocator.dupe(u8, prompt);
             }
@@ -247,27 +270,36 @@ pub const InferenceEngine = struct {
 
     /// Decode the initial batch of prompt tokens
     fn decodeInitialBatch(self: *InferenceEngine, tokens: []const llama.Token) InferenceError!void {
-        var batch = llama.llama_batch_init(@intCast(tokens.len), 0, 1);
-        defer llama.llama_batch_free(batch);
+        const batch_size: usize = @intCast(self.n_batch);
+        var offset: usize = 0;
 
-        for (tokens, 0..) |token, i| {
-            batch.token[i] = token;
-            batch.pos[i] = @intCast(i);
-            batch.n_seq_id[i] = 1;
-            batch.seq_id[i][0] = 0;
-            if (batch.logits) |logits| {
-                logits[i] = if (i == tokens.len - 1) 1 else 0;
+        while (offset < tokens.len) {
+            const remaining = tokens.len - offset;
+            const chunk_len = @min(remaining, batch_size);
+            const is_last_chunk = (offset + chunk_len) >= tokens.len;
+
+            var batch = llama.llama_batch_init(@intCast(chunk_len), 0, 1);
+            defer llama.llama_batch_free(batch);
+
+            for (0..chunk_len) |i| {
+                batch.token[i] = tokens[offset + i];
+                batch.pos[i] = @intCast(offset + i);
+                batch.n_seq_id[i] = 1;
+                batch.seq_id[i][0] = 0;
+                if (batch.logits) |logits| {
+                    // Only compute logits for last token of the last chunk
+                    logits[i] = if (is_last_chunk and i == chunk_len - 1) 1 else 0;
+                }
             }
-        }
-        batch.n_tokens = @intCast(tokens.len);
-        if (batch.logits) |logits| {
-            logits[@as(usize, @intCast(batch.n_tokens - 1))] = 1;
-        }
+            batch.n_tokens = @intCast(chunk_len);
 
-        const decode_result = llama.llama_decode(self.ctx.ctx, batch);
-        if (decode_result != 0) {
-            log.err("llama_decode failed with code {d}", .{decode_result});
-            return InferenceError.DecodeFailed;
+            const decode_result = llama.llama_decode(self.ctx.ctx, batch);
+            if (decode_result != 0) {
+                log.err("llama_decode failed with code {d}", .{decode_result});
+                return InferenceError.DecodeFailed;
+            }
+
+            offset += chunk_len;
         }
     }
 

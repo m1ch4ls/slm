@@ -100,49 +100,14 @@ const DaemonClient = struct {
 
         const stdout = std.fs.File.stdout();
 
-        // Chunk buffer for reading tokens from socket
-        var chunk_buffer: [4096]u8 = undefined;
-        var chunk_offset: usize = 0;
-        var chunk_len: usize = 0;
-
+        // Read one token at a time for immediate output
         while (true) {
-            // Fill the chunk buffer
-            const bytes_read = try protocol.readTokensIntoBuffer(file, chunk_buffer[chunk_len..]);
-            if (bytes_read == 0) break;
-            chunk_len += bytes_read;
+            const token = try protocol.readToken(file, std.heap.page_allocator);
+            if (token == null) return; // End marker
+            defer std.heap.page_allocator.free(token.?);
 
-            // Parse and write complete tokens from buffer
-            var parse_offset: usize = chunk_offset;
-            while (parse_offset + 2 <= chunk_len) {
-                const token_len = std.mem.readInt(u16, chunk_buffer[parse_offset..][0..2], .little);
-
-                // Check for end marker
-                if (token_len == 0) {
-                    return;
-                }
-
-                // Check if we have a complete token
-                if (parse_offset + 2 + token_len > chunk_len) {
-                    break; // Incomplete token, need more data
-                }
-
-                // Write token data directly to stdout
-                try stdout.writeAll(chunk_buffer[parse_offset + 2 .. parse_offset + 2 + token_len]);
-                parse_offset += 2 + token_len;
-            }
-
-            // Move any incomplete token data to front of buffer
-            if (parse_offset < chunk_len) {
-                const remaining = chunk_len - parse_offset;
-                std.mem.copyForwards(u8, chunk_buffer[0..remaining], chunk_buffer[parse_offset..chunk_len]);
-                chunk_len = remaining;
-            } else {
-                chunk_len = 0;
-            }
-            chunk_offset = 0;
+            try stdout.writeAll(token.?);
         }
-
-        try stdout.writeAll("\n");
     }
 };
 

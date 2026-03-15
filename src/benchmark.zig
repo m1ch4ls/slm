@@ -173,13 +173,13 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    var max_tokens: u32 = 1024;  // Increased default for long outputs
+    var max_tokens: u32 = 1024; // Increased default for long outputs
     var warmup_runs: u32 = 1;
     var benchmark_runs: u32 = 3;
-    var context_size: u32 = 65536;  // 64k context
-    var n_batch: u32 = 2048;  // Larger batches for better throughput
-    var flash_attn: bool = true;  // Enable flash attention by default
-    var n_threads: u32 = 16;  // Use all cores on Ryzen 9 7950X
+    var context_size: u32 = 65536; // 64k context
+    var n_batch: u32 = 2048; // Larger batches for better throughput
+    var flash_attn: bool = true; // Enable flash attention by default
+    var n_threads: u32 = 16; // Use all cores on Ryzen 9 7950X
 
     // Simple arg parsing
     var i: usize = 1;
@@ -260,15 +260,17 @@ pub fn main() !void {
 
     // Load dynamic backends
     var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const lib_path = if (std.fs.selfExeDirPath(&exe_dir_buf)) |exe_dir| blk: {
-        break :blk std.fs.path.joinZ(allocator, &[_][]const u8{ exe_dir, "lib" }) catch |err| {
+    const lib_path_allocated: ?[*:0]const u8, const lib_path: [*:0]const u8 = if (std.fs.selfExeDirPath(&exe_dir_buf)) |exe_dir| blk: {
+        const p = std.fs.path.joinZ(allocator, &[_][]const u8{ exe_dir, "lib" }) catch |err| {
             log.warn("Could not construct lib path: {s}", .{@errorName(err)});
-            break :blk "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin";
+            break :blk .{ null, "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin" };
         };
+        break :blk .{ p, p };
     } else |err| blk: {
         log.warn("Could not determine executable directory: {s}", .{@errorName(err)});
-        break :blk "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin";
+        break :blk .{ null, "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin" };
     };
+    defer if (lib_path_allocated) |p| allocator.free(std.mem.span(p));
 
     const backend_paths = &[_][*:0]const u8{
         lib_path,
@@ -299,7 +301,7 @@ pub fn main() !void {
 
     log.info("Model loaded successfully", .{});
     log.info("  Context: {d} tokens", .{context_size});
-    log.info("  Batch: {d}, Flash attention: {}", .{n_batch, flash_attn});
+    log.info("  Batch: {d}, Flash attention: {}", .{ n_batch, flash_attn });
     log.info("  Threads: {d}", .{n_threads});
 
     // Create inference engine
