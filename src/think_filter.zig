@@ -38,8 +38,6 @@ pub const ThinkFilter = struct {
         var emit_start: usize = 0;
         var i: usize = 0;
 
-        log.debug("Filtering thorough text {s}", .{text});
-
         while (i < self.buffer.items.len) {
             if (!self.in_think) {
                 // Look for <think> opening tag

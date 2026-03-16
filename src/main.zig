@@ -141,7 +141,7 @@ pub fn main() !void {
     const request = protocol.Request{
         .prompt = user_prompt,
         .stdin = stdin_content,
-        .max_tokens = 1024,
+        .max_tokens = 16384,
     };
 
     try client.sendRequest(request);

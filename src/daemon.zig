@@ -7,9 +7,7 @@ const posix = std.posix;
 
 const log = std.log.scoped(.daemon);
 
-const DEFAULT_SYSTEM_PROMPT = "You recive user instructions in <instructions> and optional input in <input> tag. Apply the user instructions literaly or say that you cannot do it." ++
-"Your audience is a large language model - LLM. Do not tailor answers for human. " ++
-"Provide short terse responses in about 100 words, unless you are specifically asked for more details.";
+const DEFAULT_SYSTEM_PROMPT = @embedFile("system.txt");
 
 var shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
@@ -322,6 +320,12 @@ pub const Daemon = struct {
 
         const options = inference.InferenceOptions{
             .max_tokens = request.max_tokens,
+            .temperature = 0.7,
+            .top_p = 0.80,
+            .top_k = 20,
+            .min_p = 0.0,
+            .presence_penalty = 1.5,
+            .repetition_penalty = 1.0,
         };
 
         // Run inference

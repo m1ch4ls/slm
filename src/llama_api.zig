@@ -141,6 +141,9 @@ pub extern fn llama_sampler_init_greedy() *Sampler;
 pub extern fn llama_sampler_init_dist(seed: u32) *Sampler;
 pub extern fn llama_sampler_init_temp(t: f32) *Sampler;
 pub extern fn llama_sampler_init_min_p(p: f32, min_keep: usize) *Sampler;
+pub extern fn llama_sampler_init_top_k(k: i32) *Sampler;
+pub extern fn llama_sampler_init_top_p(p: f32, min_keep: usize) *Sampler;
+pub extern fn llama_sampler_init_penalties(penalty_last_n: i32, penalty_repeat: f32, penalty_freq: f32, penalty_present: f32) *Sampler;
 pub extern fn llama_sampler_sample(smpl: *Sampler, ctx: *Context, idx: i32) Token;
 pub extern fn llama_sampler_free(smpl: *Sampler) void;
 

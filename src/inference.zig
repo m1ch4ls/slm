@@ -19,6 +19,16 @@ pub const InferenceOptions = struct {
     max_tokens: u32 = 512,
     /// Temperature for sampling (if null, uses greedy)
     temperature: ?f32 = null,
+    /// Top-p (nucleus) sampling threshold
+    top_p: f32 = 0.95,
+    /// Top-k sampling (0 = disabled)
+    top_k: i32 = 40,
+    /// Min-p sampling threshold
+    min_p: f32 = 0.05,
+    /// Presence penalty (0.0 = disabled)
+    presence_penalty: f32 = 0.0,
+    /// Repetition penalty (1.0 = disabled)
+    repetition_penalty: f32 = 1.0,
     /// Random seed for sampling (only used with temperature)
     seed: u32 = 0,
 };
@@ -98,7 +108,7 @@ pub const InferenceEngine = struct {
 
         log.debug("Formatted prompt ({d} bytes): {s}", .{
             formatted_prompt.len,
-            formatted_prompt[0..@min(500, formatted_prompt.len)],
+            formatted_prompt[0..@min(2000, formatted_prompt.len)],
         });
 
         // Tokenize
@@ -118,7 +128,21 @@ pub const InferenceEngine = struct {
         defer llama.llama_sampler_free(sampler);
 
         if (options.temperature) |temp| {
-            llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_min_p(0.05, 1));
+            // Penalties first (applied to logits before sampling)
+            if (options.repetition_penalty != 1.0 or options.presence_penalty != 0.0) {
+                llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_penalties(
+                    64, // penalty_last_n: look back 64 tokens
+                    options.repetition_penalty,
+                    0.0, // frequency penalty (unused, kept at 0)
+                    options.presence_penalty,
+                ));
+            }
+            // Filtering samplers (order: top_k -> top_p -> min_p -> temp -> dist)
+            if (options.top_k > 0) {
+                llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_top_k(options.top_k));
+            }
+            llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_top_p(options.top_p, 1));
+            llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_min_p(options.min_p, 1));
             llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_temp(temp));
             llama.llama_sampler_chain_add(sampler, llama.llama_sampler_init_dist(options.seed));
         } else {
@@ -138,8 +162,6 @@ pub const InferenceEngine = struct {
         while (generated_tokens < options.max_tokens and continue_generation) : (generated_tokens += 1) {
             const new_token = llama.llama_sampler_sample(sampler, self.ctx.ctx, -1);
 
-            log.debug("Sampled token: {d}", .{new_token});
-
             // Check for EOS
             if (new_token == llama.TokenNull or llama.llama_vocab_is_eog(self.vocab, new_token)) {
                 log.debug("EOS token detected (token={d}), stopping", .{new_token});
@@ -150,8 +172,6 @@ pub const InferenceEngine = struct {
             // Detokenize
             const token_text = try llama.detokenize(self.allocator, self.vocab, new_token);
             defer self.allocator.free(token_text);
-
-            log.debug("Sampled text: {s}", .{token_text});
 
             // Apply think filter
             const chunks_to_emit = try filter.process(self.allocator, token_text);
@@ -221,10 +241,10 @@ pub const InferenceEngine = struct {
         // Truncate stdin to fit within context budget
         const effective_stdin = if (has_stdin) blk: {
             const n_ctx = llama.llama_n_ctx(self.ctx.ctx);
-            //const system_prompt_tokens = if (self.system_prompt) |sp| tokenizer.countTokensExact(self.vocab, std.mem.span(sp)) else 0;
+            const system_prompt_tokens = if (self.system_prompt) |sp| tokenizer.countTokensExact(self.vocab, std.mem.span(sp)) else 0;
             const prompt_tokens = tokenizer.countTokensExact(self.vocab, prompt);
-            const template_overhead: usize = 5000;
-            const max_stdin_tokens = tokenizer.computeStdinBudget(n_ctx, prompt_tokens, max_gen_tokens, template_overhead);
+            const template_overhead: usize = 100;
+            const max_stdin_tokens = tokenizer.computeStdinBudget(n_ctx, system_prompt_tokens + prompt_tokens, max_gen_tokens, template_overhead);
 
             log.debug("Token budget: n_ctx={d}, prompt={d}, gen={d}, overhead={d}, stdin_budget={d}", .{
                 n_ctx, prompt_tokens, max_gen_tokens, template_overhead, max_stdin_tokens,
