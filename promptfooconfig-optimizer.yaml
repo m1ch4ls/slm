@@ -1,0 +1,57 @@
+# Token Optimizer Evaluation
+# Measures: compression ratio, accuracy, token savings
+
+description: "Token Optimizer - Measure compression vs quality"
+
+providers:
+  - id: file://./eval/providers/slm-daemon.js
+    label: 'slm'
+    config:
+      daemonPath: ./zig-out/bin/slm
+      timeout: 60000
+
+tests:
+  # Test 1: Process list filtering
+  - description: 'Extract node processes from ps aux'
+    vars:
+      instructions: 'List only Node.js processes with PID and command'
+      input: file://./eval/fixtures/ps-nodejs.txt
+    assert:
+      - type: llm-rubric
+        value: |
+          The output should contain only Node.js process entries.
+          Each entry should include PID and command.
+          No other processes should be listed.
+      - type: javascript
+        # Measure compression: output should be < 30% of input
+        value: |
+          const inputTokens = vars.input?.length || 1000;
+          const outputTokens = output.length;
+          const ratio = outputTokens / inputTokens;
+          console.log(`Compression: ${(ratio * 100).toFixed(1)}%`);
+          return ratio < 0.3 ? 1.0 : Math.max(0, 1 - (ratio - 0.3) * 2);
+
+  # Test 2: Log summarization
+  - description: 'Summarize error logs'
+    vars:
+      instructions: 'Extract unique error messages and their counts'
+      input: file://./eval/fixtures/logs.txt
+    assert:
+      - type: llm-rubric
+        value: 'Groups similar errors, counts occurrences, removes duplicates'
+
+  # Test 3: Git commit analysis  
+  - description: 'Find commits related to auth'
+    vars:
+      instructions: 'List commits mentioning authentication or login'
+      input: file://./eval/fixtures/git-commits.txt
+    assert:
+      - type: contains-any
+        value: ['auth', 'login', 'session', 'token', 'credential']
+
+# Measure end-to-end: SLM + GPT vs GPT alone
+derivedMetrics:
+  - name: 'avg_compression_ratio'
+    value: 'compression_ratio_sum / __count'
+  - name: 'token_savings_percent'
+    value: '(1 - avg_compression_ratio) * 100'

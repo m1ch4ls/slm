@@ -1,5 +1,9 @@
 # Simplified Promptfoo configuration for SLM Daemon evaluation
 # Quick tests to verify daemon functionality
+#
+# Variable mapping:
+#   - instructions: Command line arguments passed to SLM
+#   - input: Data sent via stdin to SLM
 
 description: "SLM Daemon Quick Evaluation"
 
@@ -10,35 +14,44 @@ providers:
       timeout: 60000
 
 prompts:
-  - '{{prompt}}'
+  - '{{instructions}}'
 
 tests:
-  # Basic functionality
+  # Basic functionality - instructions only
   - description: 'Basic prompt - hello'
     vars:
-      prompt: 'hello'
+      instructions: 'hello'
     assert:
       - type: contains-any
         value: ['hello', 'Hello']
   
   - description: 'Basic prompt - count to 5'
     vars:
-      prompt: 'count from 1 to 5'
+      instructions: 'count from 1 to 5'
     assert:
       - type: contains-any
         value: ['1', '2', '3', '4', '5']
 
   - description: 'Question answering'
     vars:
-      prompt: 'What is 2+2? Answer with just the number.'
+      instructions: 'What is 2+2? Answer with just the number.'
     assert:
       - type: contains-any
         value: ['4']
 
+  # With input data
+  - description: 'Instructions with input'
+    vars:
+      instructions: 'Summarize:'
+      input: 'The cat sat on the mat and looked at the bird.'
+    assert:
+      - type: contains-any
+        value: ['cat', 'sat', 'mat', 'bird']
+
   # Performance test
   - description: 'Response time'
     vars:
-      prompt: 'say "test completed"'
+      instructions: 'say "test completed"'
     assert:
       - type: latency
         threshold: 30000

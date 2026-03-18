@@ -1,5 +1,9 @@
 # Promptfoo configuration for SLM Daemon evaluation
 # Documentation: https://promptfoo.dev/docs/
+# 
+# Variable mapping:
+#   - instructions: Command line arguments passed to SLM
+#   - input: Data sent via stdin to SLM
 
 description: "SLM Daemon Evaluation - Testing basic functionality, edge cases, and performance"
 
@@ -11,50 +15,78 @@ providers:
       timeout: 60000
 
 prompts:
-  - '{{prompt}}'
+  - '{{instructions}}'
 
 # Test cases covering basic functionality, edge cases, performance
 tests:
   # === BASIC FUNCTIONALITY ===
-  - description: 'Simple greeting'
+  - description: 'Simple greeting - instructions only'
     vars:
-      prompt: 'hello'
+      instructions: 'hello'
     assert:
       - type: contains-any
         value: ['hello', 'Hello', 'Hi', 'Greetings']
 
   - description: 'Question answering - math'
     vars:
-      prompt: 'What is 2+2? Answer with just the number.'
+      instructions: 'What is 2+2? Answer with just the number.'
     assert:
       - type: contains
         value: '4'
 
   - description: 'Following instructions'
     vars:
-      prompt: 'Count from 1 to 3'
+      instructions: 'Count from 1 to 3'
     assert:
       - type: contains-any
         value: ['1', '2', '3']
 
+  # === WITH STDIN INPUT ===
+  - description: 'Instructions with input data'
+    vars:
+      instructions: 'Summarize:'
+      input: 'The quick brown fox jumps over the lazy dog. This is a classic pangram used for testing fonts and keyboards.'
+    assert:
+      - type: contains-any
+        value: ['fox', 'dog', 'pangram', 'sentence']
+
+  - description: 'Process code input'
+    vars:
+      instructions: 'Explain what this function does:'
+      input: 'function add(a, b) { return a + b; }'
+    assert:
+      - type: contains-any
+        value: ['add', 'sum', 'adds', 'returns']
+
+  - description: 'Translate with input'
+    vars:
+      instructions: 'Translate to Spanish:'
+      input: 'Hello, how are you today?'
+    assert:
+      - type: contains-any
+        value: ['hola', 'cómo', 'estás', 'buenos']
+
   # === EDGE CASES ===
   - description: 'Very long input handling'
     vars:
-      prompt: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+      instructions: 'Process:'
+      input: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
     assert:
       - type: not-contains
         value: 'error'
 
-  - description: 'Unicode handling'
+  - description: 'Unicode handling in instructions and input'
     vars:
-      prompt: 'Hello! ¿Cómo estás? 你好 🎉'
+      instructions: 'Respond to:'
+      input: 'Hello! ¿Cómo estás? 你好 🎉'
     assert:
       - type: not-contains
         value: 'error'
 
-  - description: 'Code snippet'
+  - description: 'Code snippet as input'
     vars:
-      prompt: 'What does this code do: function add(a, b) { return a + b; }'
+      instructions: 'Analyze:'
+      input: 'function add(a, b) { return a + b; }'
     assert:
       - type: contains-any
         value: ['add', 'sum', 'function', 'returns']
@@ -62,7 +94,7 @@ tests:
   # === PERFORMANCE ===
   - description: 'Hot request latency'
     vars:
-      prompt: 'Say "test"'
+      instructions: 'Say "test"'
     assert:
       - type: latency
         threshold: 5000  # 5 seconds (includes model inference time)

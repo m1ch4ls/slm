@@ -7,6 +7,10 @@
  * Usage in promptfooconfig.yaml:
  * providers:
  *   - file://./eval/providers/slm-daemon.js
+ * 
+ * Variable mapping:
+ *   - instructions: Command line arguments passed to SLM
+ *   - input: Data sent via stdin
  */
 
 const { spawn } = require('child_process');
@@ -31,20 +35,26 @@ class SLMDaemonProvider {
 
   /**
    * Main API call method for promptfoo
-   * @param {string} prompt - The prompt to send to SLM
+   * @param {string} prompt - The prompt template (usually '{{prompt}}')
    * @param {object} context - Test case context from promptfoo
    * @param {object} options - Provider options
    * @returns {Promise<ProviderResponse>}
+   * 
+   * Variable mapping:
+   *   - context.vars.instructions: Command line arguments (string or array)
+   *   - context.vars.input: Data sent via stdin
    */
   async callApi(prompt, context, options) {
     const startTime = Date.now();
     
     try {
-      // Check if we have stdin data from vars
-      const stdinData = context?.vars?.stdin || '';
+      // Extract instructions (CLI args) and input (stdin) from vars
+      // Support both old 'prompt' var and new 'instructions'/'input' vars
+      const instructions = context?.vars?.instructions ?? context?.vars?.prompt ?? '';
+      const input = context?.vars?.input ?? context?.vars?.stdin ?? '';
       
-      // Execute SLM CLI
-      const result = await this.executeSLM(prompt, stdinData, context);
+      // Execute SLM CLI with separated concerns
+      const result = await this.executeSLM(instructions, input, context);
       
       const latency = Date.now() - startTime;
       
@@ -60,7 +70,9 @@ class SLMDaemonProvider {
           daemonStarted: result.daemonStarted,
           truncated: result.truncated,
           tokenCount: result.tokenCount,
-          protocol: 'binary-length-prefixed'
+          protocol: 'binary-length-prefixed',
+          instructions: instructions,
+          inputLength: input.length
         }
       };
     } catch (error) {
@@ -78,12 +90,21 @@ class SLMDaemonProvider {
   /**
    * Execute the SLM CLI and capture output
    * @private
+   * @param {string|string[]} instructions - Instructions as CLI arguments
+   * @param {string} input - Input data sent via stdin
+   * @param {object} context - Test context
    */
-  async executeSLM(prompt, stdinData, context) {
+  async executeSLM(instructions, input, context) {
     return new Promise((resolve, reject) => {
-      const args = [prompt];
+      // Build command line arguments from instructions
+      let args = [];
+      if (Array.isArray(instructions)) {
+        args = instructions.map(String);
+      } else if (typeof instructions === 'string' && instructions.trim()) {
+        args = [instructions];
+      }
       
-      // Add model path if specified
+      // Add model path if specified in config
       if (this.config.modelPath) {
         args.push('--model', this.config.modelPath);
       }
@@ -144,9 +165,9 @@ class SLMDaemonProvider {
         }
       });
 
-      // Write stdin data if provided (for piped input)
-      if (stdinData) {
-        slm.stdin.write(stdinData);
+      // Write input data to stdin if provided
+      if (input && input.length > 0) {
+        slm.stdin.write(input);
       }
       
       slm.stdin.end();

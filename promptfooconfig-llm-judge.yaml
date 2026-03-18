@@ -1,0 +1,82 @@
+# Test LLM Rubric Judge with GPT-5
+# This tests how well the SLM output is judged by GPT-5
+
+description: "Testing LLM-as-a-Judge with GPT-5 evaluating SLM outputs"
+
+providers:
+  - id: file://./eval/providers/slm-daemon.js
+    label: 'slm-daemon'
+    config:
+      daemonPath: ./zig-out/bin/slm
+      timeout: 60000
+
+# Override the judge model for llm-rubric assertions
+defaultTest:
+  options:
+    provider: openai:gpt-5
+
+prompts:
+  - '{{instructions}}'
+
+# Test cases using llm-rubric for quality evaluation
+tests:
+  - description: 'Judge: Summarization quality'
+    vars:
+      instructions: 'Summarize this in one sentence:'
+      input: 'The quick brown fox jumps over the lazy dog. This pangram contains every letter of the alphabet and is commonly used for testing fonts and keyboards.'
+    assert:
+      - type: llm-rubric
+        value: 'The summary accurately captures the main point about the pangram and its use. It is concise (one sentence) and coherent.'
+        metric: SummaryQuality
+
+  - description: 'Judge: Code explanation clarity'
+    vars:
+      instructions: 'Explain what this code does in simple terms:'
+      input: 'function factorial(n) { if (n <= 1) return 1; return n * factorial(n - 1); }'
+    assert:
+      - type: llm-rubric
+        value: 'The explanation clearly describes that this is a recursive factorial function. It mentions the base case (n <= 1) and the recursive case. The explanation is accessible to someone with basic programming knowledge.'
+        metric: ExplanationClarity
+
+  - description: 'Judge: Translation accuracy'
+    vars:
+      instructions: 'Translate to French:'
+      input: 'Good morning, how are you today?'
+    assert:
+      - type: llm-rubric
+        value: 'The translation accurately conveys the greeting and question in French. It uses appropriate formality level and correct grammar.'
+        metric: TranslationAccuracy
+
+  - description: 'Judge: Response helpfulness'
+    vars:
+      instructions: 'Give me a tip for writing better code'
+    assert:
+      - type: llm-rubric
+        value: 'The tip is practical, actionable, and would genuinely help someone write better code. It is specific rather than generic advice.'
+        metric: Helpfulness
+
+  - description: 'Judge: Factual accuracy'
+    vars:
+      instructions: 'What is the capital of Japan?'
+    assert:
+      - type: llm-rubric
+        value: 'The response correctly identifies Tokyo as the capital of Japan. No incorrect information is provided.'
+        metric: Factuality
+
+  - description: 'Judge: Following constraints'
+    vars:
+      instructions: 'List three colors. Respond with only the color names, no extra text.'
+    assert:
+      - type: llm-rubric
+        value: 'The response lists exactly three color names with no extra text, explanations, or punctuation beyond what is necessary. The model followed the constraint precisely.'
+        threshold: 0.9
+        metric: ConstraintFollowing
+
+# Custom metrics aggregation
+derivedMetrics:
+  - name: 'avg_quality_score'
+    value: '(SummaryQuality + ExplanationClarity + TranslationAccuracy + Helpfulness + Factuality + ConstraintFollowing) / 6'
+  - name: 'tests_passed'
+    value: '__pass_count'
+  - name: 'tests_failed'
+    value: '__fail_count'

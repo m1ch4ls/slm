@@ -2,6 +2,22 @@
 
 A minimal CLI tool with a client-daemon architecture for piping command output to a local small language model. The daemon loads models directly via llama.cpp's C API - no external server required.
 
+## Claude Code Plugin
+
+This repository also includes a **Claude Code plugin** that reminds Claude to use slm for text processing tasks, saving API tokens.
+
+### Quick Install
+
+```bash
+# Add the marketplace
+claude plugin marketplace add github:m1ch4ls/slm
+
+# Install the plugin
+claude plugin install slm-reminder@slm
+```
+
+See [Plugin Documentation](.claude/plugins/slm/README.md) for details.
+
 ## Architecture
 
 - **slm** - Lightweight client that connects to the daemon via Unix domain socket
