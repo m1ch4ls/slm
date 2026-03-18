@@ -1,5 +1,5 @@
 {
   "name": "slm-reminder",
-  "description": "Automatically reminds Claude to use slm for large outputs and injects slm usage instructions",
+  "description": "Reminds Claude to use slm before and after Bash commands. Pre-Bash: suggests using slm for text processing (once per session via session_id tracking). Post-Bash: detects large outputs and suggests piping through slm.",
   "version": "1.0.0"
 }

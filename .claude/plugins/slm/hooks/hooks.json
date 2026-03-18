@@ -1,5 +1,15 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '💡 Remember: Use slm for simple text processing tasks. Pipe shell command output to slm when summarizing, extracting, or transforming text.'"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Bash",
