@@ -11,7 +11,7 @@
       "name": "slm-reminder",
       "source": "./.claude/plugins/slm",
       "description": "Reminds Claude to use slm (small local model) for text processing tasks. Shows reminder at session start and after large Bash outputs.",
-      "version": "1.3.0",
+      "version": "1.0.1",
       "keywords": ["slm", "tokens", "optimization", "bash", "reminder"]
     }
   ]
