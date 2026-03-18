@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '💡 Remember: Use slm for simple text processing tasks. Pipe shell command output to slm when summarizing, extracting, or transforming text.'"
+            "command": "echo '💡 Use slm instead of head/tail/grep. When you want to understand output, pipe to slm: command | slm \"what you want to know\"'"
           }
         ]
       }

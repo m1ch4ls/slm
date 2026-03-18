@@ -1,55 +1,73 @@
 ---
-description: Guidelines for using slm (small local model) to save tokens on simple text processing tasks. Use before running Bash commands that produce text output you need to analyze, summarize, extract, or transform. Always consider slm for command output processing, log parsing, data extraction, or text transformation.
+description: Guidelines for using slm (small local model) to save tokens. Use slm whenever you need to UNDERSTAND command output instead of manually sampling with head, tail, or grep.
 ---
 
 # Use slm for simple text processing
 
-**CRITICAL: Before using the Bash tool, ask yourself: "Will I need to process, summarize, or analyze the output?" If yes, pipe the output through slm instead of processing it yourself.**
+Use `slm` (local small language model) whenever you need to **understand** command output. Let slm interpret results for you instead of manually sampling with `head`, `tail`, or `grep`.
 
-Use `slm` (local small language model) instead of processing text yourself whenever the task is simple and mechanical. This saves tokens and money.
+**Why:** `head -20` and `tail -30` are guesses. You're sampling output hoping to see what you need. Slm reads everything and gives you the answer directly.
 
-**Why:** Every token spent on mundane text processing is wasted when a free local model can do it. You are an expensive API - let the cheap local model handle the grunt work.
+**Critical:** Before using `head`, `tail`, `grep`, or `wc` - use slm instead. These commands are code smells indicating you want to *understand* something, not *process* data.
 
-**How to apply:** Before running Bash or processing any text-heavy output, ask: "Could slm do this via a pipe?" If yes, use Bash to pipe the data through slm.
+## Intent Translation
 
-## When to use slm (ALWAYS consider these before Bash)
+| What you want to know | Old way (guessing) | Right way (slm) |
+|----------------------|-------------------|-----------------|
+| What does this output look like? | `\| head -20` | `\| slm "show me a representative sample"` |
+| Did tests pass or fail? | `\| tail -30` | `\| slm "did tests pass? show final status"` |
+| Are there errors? | `\| grep -i error` | `\| slm "find any errors and explain them"` |
+| What's the result? | `\| wc -l` then scan | `\| slm "summarize the key results"` |
+| Is there a problem? | Manual reading | `\| slm "is anything wrong that I need to fix?"` |
+| What changed? | `\| head -50` scan | `\| slm "describe what changed in this diff"` |
 
-| Task | Example |
-|------|---------|
-| Summarizing command output | `git log --oneline -20 | slm "summarize in 3 bullets"` |
-| Summarizing file contents | `cat README.md | slm --max-tokens=256 "summarize"` |
-| Extracting data from output | `ps aux | slm "list only python processes"` |
-| Parsing error logs | `cat errors.log | slm "group errors by type"` |
-| Counting/listing from output | `npm run lint | slm "count errors by category"` |
-| Simple text transforms | `echo "text" | slm "convert to bullet points"` |
-| Describing diffs | `git diff | slm --max-tokens=256 "summarize changes"` |
-| Formatting data | `cat data.json | slm "extract the names field as a list"` |
-| Analyzing test output | `pytest | slm "list failed tests with reasons"` |
-| Processing search results | `rg "pattern" | slm "summarize findings"` |
+## Decision Framework
 
-## When NOT to use slm
+```
+Before using Bash:
+├── Do I need the RAW DATA? (parsing, piping to another command, writing to file)
+│   └── YES → Use command directly
+├── Do I need to UNDERSTAND something? (status, errors, summary, "what happened?")
+│   └── YES → Pipe to slm
+└── Would I use head/tail/grep to sample this?
+    └── YES → Use slm instead
+```
 
-- Code generation or editing (use the LLM - correctness matters)
-- Architectural decisions or complex reasoning
-- Multi-step analysis that requires project context
-- Anything where slm output feeds into code changes (the LLM should verify)
-- Security-sensitive analysis
+## When to Use slm
+
+- **Understanding test results**: `pytest | slm "which tests failed and why"`
+- **Checking build output**: `npm run build | slm "did it succeed? any warnings?"`
+- **Log analysis**: `cat app.log | slm "find errors and exceptions"`
+- **Git history**: `git log --oneline -50 | slm "summarize recent changes"`
+- **Diff summaries**: `git diff | slm "describe the changes"`
+- **Search results**: `rg "TODO" | slm "list TODOs with file locations"`
+- **Process status**: `ps aux | slm "find the node processes"`
+- **File listings**: `ls -la | slm "which files were modified recently"`
+
+## When NOT to Use slm
+
+- **Data extraction for code** → Use `jq`, `awk`, or parse directly
+- **Feeding output into another command** → Use pipes directly
+- **Writing to files** → Use `> file` or tee
+- **Exact line counts needed** → Use `wc -l`
+- **Security-sensitive analysis** → Verify yourself
+- **Code generation from output** → Process with LLM
 
 ## Workflow: Before Every Bash Command
 
 1. **Plan the command** - What are you trying to achieve?
-2. **Will you process the output?** - If you'll summarize, extract, count, or transform the output, use slm
-3. **Pipe to slm** - Add `| slm "your instruction"` to the command
-4. **Present the result** - Show the user the slm output directly
+2. **Ask: "Do I need the data or the meaning?"**
+3. **If meaning** → Pipe to slm
+4. **If data** → Use raw output
+5. **Present results** - Show slm's answer directly
 
 ## Tips
 
-- Use `--max-tokens=256` for short summaries to keep slm fast
-- Pipe raw command output directly — don't pre-process it yourself
-- If you need to present a summary to the user, let slm generate it and show the result
-- Chain: use slm output to inform your next action, but don't trust it for code correctness
-- For large outputs (>1KB), the system will remind you automatically
+- Use `--max-tokens=256` for quick answers
+- Ask slm specific questions: "did it pass?" vs "summarize"
+- Trust slm to scan the full output - don't sample with head/tail
+- For very large outputs, slm is faster than manual scanning
 
 ---
 
-*This skill is automatically loaded before Bash commands to remind you to use slm for efficient text processing.*
+*Stop guessing with head/tail. Let slm read and answer.*
