@@ -146,11 +146,10 @@ pub const Daemon = struct {
             log.info("No chat template found, using raw prompts", .{});
         }
 
-        const uid = posix.getuid();
-        const socket_path = try std.fmt.allocPrint(allocator, "/run/user/{d}/slm/daemon.sock", .{uid});
+        const socket_path = try std.fmt.allocPrint(allocator, "/tmp/slm/daemon.sock", .{});
         errdefer allocator.free(socket_path);
 
-        const pid_path = try std.fmt.allocPrint(allocator, "/run/user/{d}/slm/daemon.pid", .{uid});
+        const pid_path = try std.fmt.allocPrint(allocator, "/tmp/slm/daemon.pid", .{});
         errdefer allocator.free(pid_path);
 
         log.info("Model loaded successfully", .{});
@@ -185,6 +184,11 @@ pub const Daemon = struct {
                 log.err("Failed to create socket directory: {}", .{err});
             }
         };
+        
+        // Make directory accessible to all users
+        const dir_path_z = try self.allocator.dupeZ(u8, dir_path);
+        defer self.allocator.free(dir_path_z);
+        _ = std.posix.system.chmod(dir_path_z, 0o777);
 
         // Acquire PID file lock to prevent multiple daemons
         const pid_path_z = try self.allocator.dupeZ(u8, self.pid_path);
@@ -251,6 +255,10 @@ pub const Daemon = struct {
             return err;
         };
         log.info("Socket bound successfully", .{});
+        
+        // Make socket accessible to all users
+        _ = std.posix.system.chmod(socket_path_z, 0o777);
+        
         try std.posix.listen(socket, 1);
 
         log.info("Daemon listening on {s}", .{self.socket_path});

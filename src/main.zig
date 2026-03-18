@@ -3,14 +3,19 @@ const protocol = @import("protocol.zig");
 
 const log = std.log.scoped(.slm);
 
+const Config = struct {
+    prompt: ?[]const u8 = null,
+    max_tokens: u32 = 16384,
+    show_help: bool = false,
+};
+
 const DaemonClient = struct {
     allocator: std.mem.Allocator,
     socket_path: []const u8,
     socket: ?std.posix.fd_t,
 
     pub fn init(allocator: std.mem.Allocator) !DaemonClient {
-        const uid = std.posix.getuid();
-        const socket_path = try std.fmt.allocPrint(allocator, "/run/user/{d}/slm/daemon.sock", .{uid});
+        const socket_path = try std.fmt.allocPrint(allocator, "/tmp/slm/daemon.sock", .{});
 
         return DaemonClient{
             .allocator = allocator,
@@ -115,6 +120,76 @@ const DaemonClient = struct {
     }
 };
 
+fn printHelp() void {
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll(
+        \\slm - Small Language Model CLI
+        \\
+        \\USAGE:
+        \\    slm [OPTIONS] <prompt>
+        \\    slm --help
+        \\
+        \\DESCRIPTION:
+        \\    Pipes input to a local small language model for text processing.
+        \\    Reads from stdin and processes with the given prompt.
+        \\
+        \\    The daemon (slm-daemon) starts automatically when needed.
+        \\
+        \\ARGUMENTS:
+        \\    <prompt>          Instruction for the language model. Required unless --help.
+        \\                      Examples: "summarize", "find errors", "translate to Spanish"
+        \\
+        \\OPTIONS:
+        \\    --help            Show this help message and exit.
+        \\    --max-tokens=N    Maximum tokens to generate (default: 16384).
+        \\                      Lower values = faster, shorter responses.
+        \\                      Examples: --max-tokens=256, --max-tokens=4096
+        \\
+        \\EXAMPLES:
+        \\    # Find errors in logs
+        \\    cat application.log | slm "find all error messages"
+        \\
+        \\    # Extract specific data
+        \\    ps aux | slm "list only the node processes"
+        \\
+        \\    # Summarize with limited output
+        \\    git diff | slm --max-tokens=256 "summarize in 3 bullets"
+        \\
+        \\CONFIGURATION:
+        \\    Config file: ~/.config/slm/config
+        \\    model=/path/to/model.gguf    (required)
+        \\    context_size=32768           (optional)
+        \\    n_threads=4                 (optional)
+        \\
+    ) catch {};
+}
+
+fn parseArgs(args: [][:0]u8) !Config {
+    var config: Config = .{};
+
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--help")) {
+            config.show_help = true;
+        } else if (std.mem.startsWith(u8, arg, "--max-tokens=")) {
+            const value = arg["--max-tokens=".len..];
+            config.max_tokens = std.fmt.parseInt(u32, value, 10) catch {
+                log.err("Invalid --max-tokens value: {s}", .{value});
+                return error.InvalidArgument;
+            };
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            log.err("Unknown option: {s}", .{arg});
+            return error.InvalidArgument;
+        } else if (config.prompt == null) {
+            config.prompt = arg;
+        } else {
+            log.err("Unexpected argument: {s}", .{arg});
+            return error.InvalidArgument;
+        }
+    }
+
+    return config;
+}
+
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -123,12 +198,23 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len < 2) {
-        log.err("Usage: slm <prompt>", .{});
+    const config = parseArgs(args) catch {
+        printHelp();
+        return error.InvalidArgument;
+    };
+
+    if (config.show_help) {
+        printHelp();
+        return;
+    }
+
+    if (config.prompt == null) {
+        log.err("Missing required argument: <prompt>", .{});
+        log.err("Usage: slm [OPTIONS] <prompt>", .{});
         log.err("       echo 'text' | slm 'extract emails'", .{});
+        log.err("Run 'slm --help' for full documentation.", .{});
         return error.MissingPrompt;
     }
-    const user_prompt = args[1];
 
     const stdin_content = try readStdin(allocator);
     defer allocator.free(stdin_content);
@@ -139,9 +225,9 @@ pub fn main() !void {
     try client.connect();
 
     const request = protocol.Request{
-        .prompt = user_prompt,
+        .prompt = config.prompt.?,
         .stdin = stdin_content,
-        .max_tokens = 16384,
+        .max_tokens = config.max_tokens,
     };
 
     try client.sendRequest(request);
