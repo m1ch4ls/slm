@@ -1,0 +1,5 @@
+{
+  "name": "slm-reminder",
+  "description": "Automatically reminds Claude to use slm for large outputs and injects slm usage instructions",
+  "version": "1.0.0"
+}
