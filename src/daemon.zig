@@ -288,6 +288,22 @@ pub const Daemon = struct {
             };
 
             log.info("Client connected", .{});
+
+            // macOS inherits O_NONBLOCK from the listening socket onto accepted
+            // client sockets; Linux's accept4(flags=0) does not. Clear it so
+            // protocol reads in handleClient can block normally on both platforms.
+            const flags = std.posix.fcntl(client_socket, std.posix.F.GETFL, 0) catch |err| {
+                log.err("fcntl GETFL failed: {}", .{err});
+                std.posix.close(client_socket);
+                continue;
+            };
+            const nonblock_mask = @as(usize, @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
+            _ = std.posix.fcntl(client_socket, std.posix.F.SETFL, flags & ~nonblock_mask) catch |err| {
+                log.err("fcntl SETFL failed: {}", .{err});
+                std.posix.close(client_socket);
+                continue;
+            };
+
             self.handleClient(client_socket) catch |err| {
                 log.err("Client error: {}", .{err});
             };
@@ -390,36 +406,18 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Load dynamic backends from the distribution lib directory
-    // With GGML_BACKEND_DL, backends are loaded at runtime from .so files
-    // First try path relative to executable, then fall back to dev path
-
-    // Get the directory where this binary is located
+    // Load dynamic backends from <exe_dir>/../lib (populated by `zig build`).
     var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-
-    var lib_path_allocated: ?[:0]u8 = null;
-    defer if (lib_path_allocated) |p| allocator.free(p);
-
-    const lib_path: [*:0]const u8 = if (std.fs.selfExeDirPath(&exe_dir_buf)) |exe_dir| blk: {
-        const joined = std.fs.path.joinZ(allocator, &[_][]const u8{ exe_dir, "lib" }) catch |err| {
+    if (std.fs.selfExeDirPath(&exe_dir_buf)) |exe_dir| {
+        if (std.fs.path.joinZ(allocator, &[_][]const u8{ exe_dir, "..", "lib" })) |lib_path| {
+            defer allocator.free(lib_path);
+            log.info("Loading dynamic backends from: {s}", .{lib_path});
+            llama.ggml_backend_load_all_from_path(lib_path);
+        } else |err| {
             log.warn("Could not construct lib path: {s}", .{@errorName(err)});
-            break :blk "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin";
-        };
-        lib_path_allocated = joined;
-        break :blk joined;
-    } else |err| blk: {
+        }
+    } else |err| {
         log.warn("Could not determine executable directory: {s}", .{@errorName(err)});
-        break :blk "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin";
-    };
-
-    const backend_paths = &[_][*:0]const u8{
-        lib_path, // Distribution: backends in lib/ subdirectory relative to binary
-        "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin", // Development
-    };
-
-    for (backend_paths) |path| {
-        log.info("Loading dynamic backends from: {s}", .{path});
-        llama.ggml_backend_load_all_from_path(path);
     }
 
     // Now initialize llama (after backends are loaded)

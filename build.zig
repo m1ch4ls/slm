@@ -4,8 +4,31 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const llama_include = b.path("llama.cpp/include");
-    const llama_build = b.path("llama.cpp/build/bin");
+    // Resolve llama.cpp library and include paths.
+    // Priority: -Dllama_prefix=... > Homebrew (macOS) > local llama.cpp/build/bin
+    const llama_prefix = b.option([]const u8, "llama_prefix", "Path to llama.cpp installation prefix (e.g. /usr, /opt/homebrew)");
+    const llama_brew = if (llama_prefix == null) detectHomebrew(b) else null;
+
+    const llama_lib_dir: []const u8 = if (llama_prefix) |p|
+        b.pathJoin(&.{ p, "lib" })
+    else if (llama_brew) |p|
+        b.pathJoin(&.{ p, "lib" })
+    else
+        "llama.cpp/build/bin";
+
+    const llama_lib_path: std.Build.LazyPath = .{ .cwd_relative = llama_lib_dir };
+
+    const llama_include: std.Build.LazyPath = if (llama_prefix) |p|
+        .{ .cwd_relative = b.pathJoin(&.{ p, "include" }) }
+    else if (llama_brew) |p|
+        .{ .cwd_relative = b.pathJoin(&.{ p, "include" }) }
+    else
+        b.path("llama.cpp/include");
+
+    // Copy libllama / libggml libraries into zig-out/lib/ so the binaries
+    // can find them at runtime via their $ORIGIN/../lib rpath.
+    installLlamaLibs(b, llama_lib_dir);
+
 
     const client_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -52,7 +75,7 @@ pub fn build(b: *std.Build) void {
     }
 
     daemon.root_module.addIncludePath(llama_include);
-    daemon.root_module.addLibraryPath(llama_build);
+    daemon.root_module.addLibraryPath(llama_lib_path);
 
     // Link core llama.cpp libraries (shared libs required for GGML_BACKEND_DL)
     daemon.root_module.linkSystemLibrary("llama", .{});
@@ -94,7 +117,7 @@ pub fn build(b: *std.Build) void {
     }
 
     benchmark.root_module.addIncludePath(llama_include);
-    benchmark.root_module.addLibraryPath(llama_build);
+    benchmark.root_module.addLibraryPath(llama_lib_path);
 
     // Link core llama.cpp libraries
     benchmark.root_module.linkSystemLibrary("llama", .{});
@@ -154,4 +177,64 @@ pub fn build(b: *std.Build) void {
 
     const run_tokenizer_test = b.addRunArtifact(tokenizer_test);
     test_step.dependOn(&run_tokenizer_test.step);
+}
+
+/// Copies libllama* and libggml* shared libraries into zig-out/lib/ so the
+/// binaries find them at runtime via their $ORIGIN/../lib rpath.
+///
+/// On Homebrew installs, the loadable backends (libggml-cpu*.so, libggml-metal.so)
+/// live in the Cellar's libexec/ rather than lib/. We resolve libggml.dylib's real
+/// path to find the Cellar prefix and scan its libexec/ as well.
+fn installLlamaLibs(b: *std.Build, lib_dir: []const u8) void {
+    installLibsFromDir(b, lib_dir);
+
+    // Resolve libggml.dylib -> real path -> Cellar prefix -> libexec/
+    for (&[_][]const u8{ "libggml.dylib", "libggml.so" }) |name| {
+        const link = b.pathJoin(&.{ lib_dir, name });
+        if (std.fs.realpathAlloc(b.allocator, link)) |real| {
+            defer b.allocator.free(real);
+            // real = <cellar>/lib/libggml.X.Y.dylib  →  dirname twice = <cellar>
+            if (std.fs.path.dirname(real)) |cellar_lib|
+                if (std.fs.path.dirname(cellar_lib)) |cellar_prefix| {
+                    installLibsFromDir(b, b.pathJoin(&.{ cellar_prefix, "libexec" }));
+                };
+            break;
+        } else |_| {}
+    }
+}
+
+fn installLibsFromDir(b: *std.Build, dir_path: []const u8) void {
+    var dir = if (std.fs.path.isAbsolute(dir_path))
+        std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return
+    else
+        std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (iter.next() catch return) |entry| {
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
+        const name = entry.name;
+        if (!std.mem.startsWith(u8, name, "libllama") and
+            !std.mem.startsWith(u8, name, "libggml")) continue;
+        if (!std.mem.endsWith(u8, name, ".dylib") and
+            !std.mem.endsWith(u8, name, ".so") and
+            std.mem.indexOf(u8, name, ".so.") == null) continue;
+
+        const src = b.pathJoin(&.{ dir_path, name });
+        const dest = b.pathJoin(&.{ "lib", name });
+        const step = b.addInstallFile(.{ .cwd_relative = src }, dest);
+        b.getInstallStep().dependOn(&step.step);
+    }
+}
+
+/// Returns the Homebrew prefix if llama.cpp is installed there, otherwise null.
+/// Checks arm64 (/opt/homebrew) then Intel (/usr/local) prefixes.
+fn detectHomebrew(b: *std.Build) ?[]const u8 {
+    const candidates = [_][]const u8{ "/opt/homebrew", "/usr/local" };
+    for (candidates) |prefix| {
+        const lib = b.pathJoin(&.{ prefix, "lib", "libllama.dylib" });
+        std.fs.accessAbsolute(lib, .{}) catch continue;
+        return prefix;
+    }
+    return null;
 }

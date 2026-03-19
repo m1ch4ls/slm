@@ -256,28 +256,18 @@ pub fn main() !void {
 
     log.info("Loading model from {s}", .{config.model_path});
 
-    // Load dynamic backends
+    // Load dynamic backends from <exe_dir>/../lib (populated by `zig build`).
     var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const lib_path_allocated: ?[*:0]const u8, const lib_path: [*:0]const u8 = if (std.fs.selfExeDirPath(&exe_dir_buf)) |exe_dir| blk: {
-        const p = std.fs.path.joinZ(allocator, &[_][]const u8{ exe_dir, "lib" }) catch |err| {
+    if (std.fs.selfExeDirPath(&exe_dir_buf)) |exe_dir| {
+        if (std.fs.path.joinZ(allocator, &[_][]const u8{ exe_dir, "..", "lib" })) |lib_path| {
+            defer allocator.free(lib_path);
+            log.info("Loading backends from: {s}", .{lib_path});
+            llama.ggml_backend_load_all_from_path(lib_path);
+        } else |err| {
             log.warn("Could not construct lib path: {s}", .{@errorName(err)});
-            break :blk .{ null, "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin" };
-        };
-        break :blk .{ p, p };
-    } else |err| blk: {
+        }
+    } else |err| {
         log.warn("Could not determine executable directory: {s}", .{@errorName(err)});
-        break :blk .{ null, "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin" };
-    };
-    defer if (lib_path_allocated) |p| allocator.free(std.mem.span(p));
-
-    const backend_paths = &[_][*:0]const u8{
-        lib_path,
-        "/home/m1ch4ls/play/token-saver/llama.cpp/build/bin",
-    };
-
-    for (backend_paths) |path| {
-        log.info("Loading backends from: {s}", .{path});
-        llama.ggml_backend_load_all_from_path(path);
     }
 
     // Initialize llama
