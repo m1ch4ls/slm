@@ -1,14 +1,14 @@
 # SLM Plugin for OpenCode
 
-This plugin automatically injects SLM usage instructions into opencode's system prompt and reminds the agent to use the `slm` tool when bash command output exceeds 1KB.
+This plugin automatically injects SLM usage instructions into opencode's system prompt and reminds the agent to use the `slm` tool when they use sampling commands (head, tail, grep, etc.) or when output exceeds 1KB.
 
 ## What it does
 
-1. **Injects instructions into system prompt** - Uses `experimental.chat.system.transform` hook to load `SLM_INSTRUCTIONS.md` and add it to the system prompt (like how CLAUDE.md works)
-
-2. **Monitors bash executions** - Uses the `tool.execute.after` hook to detect large outputs
-
-3. **Reminds about slm** - When output exceeds 1KB, injects a reminder to pipe through slm
+1. **Injects instructions into system prompt** - Uses `experimental.chat.system.transform` hook to load `SLM_INSTRUCTIONS.md` and add it to the system prompt
+ 
+2. **Detects sampling commands** - Uses `tool.execute.after` hook to detect head/tail/grep/wc/awk/less/more and suggest slm alternatives
+ 
+3. **Monitors large outputs** - When output exceeds 1KB (and no sampling detected), injects a reminder with rate limiting
 
 ## Files
 
@@ -57,13 +57,37 @@ System Prompt Assembly:
 └── SLM_INSTRUCTIONS.md ← Injected by this plugin
 ```
 
-### Large Output Reminder
+### Sampling Detection & Large Output Reminder
 
-When a bash command produces more than 1KB of output, the plugin injects a context message:
+The plugin checks every bash command after execution:
 
-> ⚠️ **Large Output Detected**: The previous bash command produced 2048 bytes of output (>1KB).
+**Sampling Detection** (always triggers, no rate limit):
+When a command uses `head`, `tail`, `grep`, `wc`, `awk`, or `less/more`:
+ 
+> 💡 **Sampling Detected**: You used 'tail' to sample output.
 >
-> Consider piping this output through `slm` to summarize or extract relevant information.
+> Consider using slm instead - it reads everything and gives you the answer:
+>   • Instead of: your-command | tail -30
+>   • Use: your-command | slm "what's the final status?"
+
+**Large Output Detection** (rate limited):
+When output exceeds 1KB and no sampling detected:
+
+> 💡 **Large Output**: The previous bash command produced 2048 bytes of output.
+>
+> Consider using slm to understand the output instead of reading it all:
+>   • your-command | slm "summarize the key points"
+>   • your-command | slm "did it succeed? any errors?"
+
+### Rate Limiting
+
+Large output reminders use rate limiting to avoid spam:
+ - First reminder: immediate
+ - Second reminder: after 3 tool calls
+ - Third reminder: after 6 tool calls
+ - Fourth+: after 10 tool calls
+
+Rate limiting resets when you actually use slm in a command.
 
 ## Customization
 
@@ -94,11 +118,13 @@ The plugin loads this file dynamically, so changes take effect for new sessions 
 │  .transform hook)           │     └──────────────────────┘
 └─────────────────────────────┘
 
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Bash Execute   │────▶│ Check Output Size │────▶│ Remind if >1KB  │
-│ (tool.execute   │     │ (tool.execute     │     │ (session.prompt  │
-│  .after hook)   │     │  .after hook)     │     │  noReply: true) │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
+┌─────────────────┐     ┌───────────────────────┐     ┌──────────────────┐
+│  Bash Execute   │────▶│ Detect Sampling       │────▶│ Suggest slm      │
+│ (tool.execute   │     │ (head/tail/grep/etc)  │     │ (no rate limit)  │
+│  .after hook)   │     └───────────────────────┘     └──────────────────┘
+└─────────────────┘
+         │
+         └───────────▶ Check Size > 1KB ────▶ Rate Limited Reminder
 ```
 
 ## Hooks Used

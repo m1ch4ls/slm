@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '💡 Use slm instead of head/tail/grep. When you want to understand output, pipe to slm: command | slm \"what you want to know\"'"
+            "command": "jq -n '{hookSpecificOutput: {hookEventName: \"SessionStart\", additionalContext: \"💡 Use slm instead of head/tail/grep. When you want to understand output, pipe to slm: command | slm \\\"what you want to know\\\"\"}}'"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/check-output-size.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/detect-sampling.sh"
           }
         ]
       }

@@ -23,6 +23,30 @@ export const SlmPlugin: Plugin = async ({ client, directory }) => {
     return 10; // Fourth+: wait 10 tool calls
   };
 
+  // Check if command uses sampling patterns
+  const getSamplingTool = (command: string): string | null => {
+    if (/\|\s*head\b/.test(command)) return 'head';
+    if (/\|\s*tail\b/.test(command)) return 'tail';
+    if (/\|\s*grep\b/.test(command)) return 'grep';
+    if (/\|\s*wc\b/.test(command)) return 'wc';
+    if (/\|\s*awk\b/.test(command)) return 'awk';
+    if (/\|\s*less\b/.test(command) || /\|\s*more\b/.test(command)) return 'less/more';
+    return null;
+  };
+
+  // Get suggestion text based on sampling tool
+  const getSamplingSuggestion = (tool: string): string => {
+    const suggestions: Record<string, string> = {
+      head: '  • Instead of: your-command | head -20\n  • Use: your-command | slm "show me a representative sample"',
+      tail: '  • Instead of: your-command | tail -30\n  • Use: your-command | slm "what\'s the final status?"',
+      grep: '  • Instead of: your-command | grep "pattern"\n  • Use: your-command | slm "find lines about pattern"',
+      wc: '  • Instead of: your-command | wc -l\n  • Use: your-command | slm "count items and summarize"',
+      awk: '  • Instead of: your-command | awk ...\n  • Use: your-command | slm "extract the data you need"',
+      'less/more': '  • Use: your-command | slm "what you want to know"',
+    };
+    return suggestions[tool] || '  • Use: your-command | slm "what you want to know"';
+  };
+
   // Load instructions file
   const instructionsPath = join(directory, "SLM_INSTRUCTIONS.md");
   let slmInstructions = "";
@@ -30,27 +54,7 @@ export const SlmPlugin: Plugin = async ({ client, directory }) => {
     slmInstructions = readFileSync(instructionsPath, "utf-8");
   } catch (error) {
     // Fallback to embedded instructions if file not found
-    slmInstructions = `# Use slm for simple text processing
-
-Use \`slm\` (local small language model) instead of processing text yourself whenever the task is simple and mechanical. This saves tokens and money.
-
-**How to apply:** Before writing a text-heavy response, ask: "Could slm do this via a pipe?"
-
-## When to use slm
-
-| Task | Example |
-|------|---------|
-| Summarizing output | \`command \| slm "summarize"\` |
-| Extracting data | \`ps aux \| slm "list only node processes"\` |
-| Parsing logs | \`cat errors.log \| slm "group by type"\` |
-| Describing diffs | \`git diff \| slm "summarize changes"\` |
-
-## When NOT to use slm
-
-- Code generation or editing (correctness matters)
-- Architectural decisions
-- Multi-step analysis requiring context
-- Security-sensitive analysis`;
+    slmInstructions = `# Use slm for simple text processing\n\nUse \`slm\` (local small language model) instead of processing text yourself whenever the task is simple and mechanical. This saves tokens and money.`;
   }
 
   return {
@@ -67,7 +71,7 @@ Use \`slm\` (local small language model) instead of processing text yourself whe
       output.system.push(`\n\n## Instructions from: SLM_INSTRUCTIONS.md\n\n${slmInstructions}`);
     },
 
-    // Remind about slm for large outputs
+    // Remind about slm for large outputs or sampling commands
     "tool.execute.after": async (input, output) => {
       // Only check bash tool executions
       if (input.tool !== "bash") {
@@ -91,9 +95,27 @@ Use \`slm\` (local small language model) instead of processing text yourself whe
       const outputContent = typeof output === "string" ? output : JSON.stringify(output);
       const outputSize = Buffer.byteLength(outputContent, "utf8");
 
-      // Check if we should remind: large output AND enough tool calls have passed
-      const threshold = getThreshold();
-      const shouldRemind = outputSize > SIZE_THRESHOLD && state.toolsSinceLastReminder >= threshold;
+      // Check if command uses sampling
+      const samplingTool = command ? getSamplingTool(command) : null;
+      const isLargeOutput = outputSize > SIZE_THRESHOLD;
+
+      // Determine if we should remind and what type of reminder
+      let shouldRemind = false;
+      let reminderText = "";
+      let reminderType = "";
+
+      if (samplingTool) {
+        const threshold = getThreshold();
+        shouldRemind = state.toolsSinceLastReminder >= threshold;
+        reminderType = "sampling";
+        reminderText = `💡 **Sampling Detected**: You used '${samplingTool}' to sample output.\n\nConsider using slm instead - it reads everything and gives you the answer:\n${getSamplingSuggestion(samplingTool)}`;
+      } else if (isLargeOutput) {
+        // Apply rate limiting for large output reminders
+        const threshold = getThreshold();
+        shouldRemind = state.toolsSinceLastReminder >= threshold;
+        reminderType = "large_output";
+        reminderText = `💡 **Large Output**: The previous bash command produced ${outputSize} bytes of output.\n\nConsider using slm to understand the output instead of reading it all:\n  • your-command | slm "summarize the key points"\n  • your-command | slm "did it succeed? any errors?"`;
+      }
 
       if (shouldRemind) {
         // Capture state before resetting for logging
@@ -105,9 +127,11 @@ Use \`slm\` (local small language model) instead of processing text yourself whe
         const currentSession = sessions.data[0]; // Get most recent session
 
         if (currentSession) {
-          // Update state - reset counter and increment reminder count
-          state.reminderCount++;
-          state.toolsSinceLastReminder = 0;
+          // Update state - reset counter and increment reminder count for large outputs only
+          if (reminderType === "large_output") {
+            state.reminderCount++;
+            state.toolsSinceLastReminder = 0;
+          }
 
           // Inject a reminder message into the session
           await client.session.prompt({
@@ -117,11 +141,7 @@ Use \`slm\` (local small language model) instead of processing text yourself whe
               parts: [
                 {
                   type: "text",
-                  text: `⚠️ **Large Output Detected**: The previous bash command produced ${outputSize} bytes of output (>1KB).
-
-Consider piping this output through \`slm\` to summarize or extract relevant information. Examples:
-- \`your-command | slm "summarize the key findings"\`
-- \`your-command | slm "extract only the error messages"\``,
+                  text: reminderText,
                 },
               ],
             },
@@ -133,14 +153,16 @@ Consider piping this output through \`slm\` to summarize or extract relevant inf
           body: {
             service: "slm-reminder",
             level: "info",
-            message: `Large bash output detected (${outputSize} bytes), suggested using slm`,
+            message: `${reminderType === "sampling" ? "Sampling command" : "Large bash output"} detected, suggested using slm`,
             extra: {
               command,
+              samplingTool,
               outputSize,
               sizeThreshold: SIZE_THRESHOLD,
               toolsSinceLastReminder: toolsCounted,
               reminderCount: reminderNum,
-              nextReminderThreshold: getThreshold(),
+              reminderType,
+              nextReminderThreshold: reminderType === "large_output" ? getThreshold() : null,
             },
           },
         });

@@ -1,6 +1,6 @@
 # SLM Reminder Plugin for Claude Code
 
-Automatically reminds Claude to use `slm` (small local model) for processing large text outputs, saving API tokens and money.
+Automatically reminds Claude to use `slm` (small local model) instead of sampling commands like head/tail/grep, saving API tokens and money.
 
 This plugin is part of the **slm** marketplace.
 
@@ -8,8 +8,8 @@ This plugin is part of the **slm** marketplace.
 
 - **SLM Instructions Skill**: Injects usage guidelines into Claude's context (auto-invoked)
 - **Session Start Reminder**: Hook reminds about slm usage once at session start
-- **Post-Bash Large Output Detection**: Shell script checks bash output size (no LLM overhead)
-- **Smart Reminders**: Triggers at session start and when output exceeds 1KB threshold
+- **Sampling Detection**: Detects head/tail/grep/wc usage and suggests slm alternatives
+- **Large Output Fallback**: Also reminds for large outputs (>1KB) even without sampling
 
 ## Installation
 
@@ -37,7 +37,8 @@ claude plugin add /path/to/.claude/plugins/slm --scope project
 1. **Context Injection**: The `slm-instructions` skill loads automatically and provides guidelines on when to use slm
 2. **Session Start Reminder**: When a session starts, a hook outputs a brief reminder to consider using slm
 3. **Post-Bash Hook**: After every Bash tool execution, the shell script checks the JSON payload
-4. **Size Check**: If `tool_output` exceeds 1KB, a reminder is printed to stdout (which Claude sees as context)
+4. **Sampling Detection**: If the command used head, tail, grep, wc, awk, or less/more, a specific suggestion is shown
+5. **Size Check**: If `tool_output` exceeds 1KB (and no sampling detected), a reminder is printed
 
 ### Hook Implementation
 
@@ -47,11 +48,13 @@ claude plugin add /path/to/.claude/plugins/slm --scope project
 - Zero overhead after session initialization
 
 **PostToolUse (after Bash)**:
-- Uses a **shell script** (`scripts/check-output-size.sh`) that:
+- Uses a **shell script** (`scripts/detect-sampling.sh`) that:
   - Receives `PostToolUse` JSON on stdin
-  - Uses `jq` to extract the `tool_output` field
-  - Counts bytes with `wc -c`
-  - Conditionally outputs a tip if threshold exceeded
+  - Extracts the command and output using `jq`
+  - Checks if the command contains sampling patterns (head, tail, grep, wc, awk, less, more)
+  - Skips commands that already use slm (avoids redundant suggestions)
+  - Counts bytes with `wc -c` for large output detection
+  - Outputs contextual suggestions based on what was detected
 
 **No LLM calls are made** - this is deterministic and fast.
 
@@ -67,7 +70,7 @@ slm/
 ├── hooks/
 │   └── hooks.json               # Hook configurations (SessionStart, PostToolUse)
 ├── scripts/
-│   └── check-output-size.sh     # Deterministic size checker
+│   └── detect-sampling.sh       # Detects sampling commands and large outputs
 └── README.md                    # This file
 ```
 
@@ -85,7 +88,22 @@ slm/
 
 **At session start:**
 ```
-💡 Remember: Use slm for simple text processing tasks. Pipe command output to slm when summarizing, extracting, or transforming text.
+💡 Use slm instead of head/tail/grep. When you want to understand output, pipe to slm: command | slm "what you want to know"
+```
+
+**After using a sampling command:**
+```bash
+$ npm test 2>&1 | tail -30
+# ... 30 lines of output ...
+```
+
+Claude will see:
+```
+💡 **Sampling Detected**: You used 'tail' to sample output.
+
+Consider using slm instead - it reads everything and gives you the answer:
+  • Instead of: your-command | tail -30
+  • Use: your-command | slm "what's the final status?"
 ```
 
 **After running Bash with large output:**
@@ -96,12 +114,11 @@ $ git log --oneline -50
 
 Claude will see:
 ```
-💡 **SLM Tip**: The previous bash command produced 2847 bytes of output (>1KB).
+💡 **Large Output**: The previous command produced 2847 bytes of output.
 
-Consider using slm to process this output and save tokens:
-  • Summarize: your-command | slm "summarize the key points"
-  • Extract: your-command | slm "extract only error messages"
-  • Count: your-command | slm "count occurrences by category"
+Consider using slm to understand the output instead of reading it all:
+  • your-command | slm "summarize the key points"
+  • your-command | slm "did it succeed? any errors?"
 ```
 
 ## Requirements
