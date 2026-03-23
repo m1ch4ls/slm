@@ -40,30 +40,82 @@ pub fn countTokensExact(vocab: *llama.Vocab, text: []const u8) usize {
     return @intCast(n);
 }
 
+/// Find a UTF-8 safe boundary at or before the given position.
+/// Returns the position of the start of the current UTF-8 character.
+pub fn findUtf8Boundary(text: []const u8, pos: usize) usize {
+    if (pos == 0) return 0;
+    if (pos > text.len) return text.len;
+    if (pos == text.len) return pos;
+
+    // Check if pos is already a valid boundary
+    const b = text[pos];
+    // If it's not a continuation byte (0x80-0xBF), it's a character start
+    if (b & 0xC0 != 0x80) return pos;
+
+    // Walk backwards to find the start of the UTF-8 character
+    // Valid UTF-8:
+    // 0xxxxxxx - ASCII (1 byte)
+    // 110xxxxx - start of 2-byte sequence
+    // 1110xxxx - start of 3-byte sequence
+    // 11110xxx - start of 4-byte sequence
+    // 10xxxxxx - continuation byte (not a start)
+    var i = pos;
+    while (i > 0) {
+        i -= 1;
+        const byte = text[i];
+        // If this is not a continuation byte, it's a character start
+        if (byte & 0xC0 != 0x80) return i;
+    }
+    return 0;
+}
+
+/// Truncate text to fit within max_tokens using binary search over byte positions.
+/// Counts tokens from text[0..probe] each iteration; must count from zero because
+/// tokenizers are context-sensitive at boundaries (token at seam depends on prior bytes).
+/// Known counts at lo and hi are threaded through to skip redundant tokenize calls
+/// when a probe lands exactly on a boundary already measured.
 pub fn truncateForTokenBudget(
     allocator: std.mem.Allocator,
     vocab: *llama.Vocab,
     text: []const u8,
     max_tokens: usize,
 ) ![]const u8 {
+    if (text.len == 0 or max_tokens == 0) {
+        return try allocator.dupe(u8, "");
+    }
+
     const total_tokens = countTokensExact(vocab, text);
     if (total_tokens <= max_tokens) {
         return try allocator.dupe(u8, text);
     }
 
-    var start: usize = 0;
-    var end: usize = text.len;
+    var lo: usize = 0;
+    var hi: usize = text.len;
     var best_pos: usize = 0;
+    // known_lo: token count at text[0..lo]. Valid at lo=0 (count is 0);
+    // becomes null whenever lo advances to an unmeasured byte position.
+    var known_lo: ?usize = 0;
+    // known_hi: token count at text[0..hi]. Always valid; starts as total_tokens.
+    var known_hi: usize = total_tokens;
 
-    while (start < end) {
-        const mid = start + (end - start) / 2;
-        const tokens = countTokensExact(vocab, text[0..mid]);
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const test_pos = findUtf8Boundary(text, mid);
+
+        const tokens = if (test_pos == hi)
+            known_hi
+        else if (test_pos == lo)
+            (known_lo orelse countTokensExact(vocab, text[0..test_pos]))
+        else
+            countTokensExact(vocab, text[0..test_pos]);
 
         if (tokens <= max_tokens) {
-            best_pos = mid;
-            start = mid + 1;
+            best_pos = test_pos;
+            lo = test_pos + 1;
+            known_lo = null;
         } else {
-            end = mid;
+            hi = test_pos;
+            known_hi = tokens;
         }
     }
 
@@ -103,6 +155,37 @@ pub fn formatChat(
     const truncated = try truncateForTokenBudget(allocator, vocab, user_message, available);
     if (needs_free) allocator.free(user_message);
     return truncated;
+}
+
+test "findUtf8Boundary - ASCII" {
+    const text = "hello world";
+    try std.testing.expectEqual(@as(usize, 0), findUtf8Boundary(text, 0));
+    try std.testing.expectEqual(@as(usize, 5), findUtf8Boundary(text, 5));
+    try std.testing.expectEqual(@as(usize, 11), findUtf8Boundary(text, 11));
+    try std.testing.expectEqual(@as(usize, 11), findUtf8Boundary(text, 100));
+}
+
+test "findUtf8Boundary - multi-byte UTF-8" {
+    // "Hello 世界" - "世" is 3 bytes (E4 B8 96), "界" is 3 bytes (E7 95 8C)
+    const text = "Hello 世界";
+    // Byte positions: H=0, e=1, l=2, l=3, o=4, space=5, 世=6-8, 界=9-11
+
+    // Cutting at byte 7 (middle of "世") should give us byte 6 (start of "世")
+    try std.testing.expectEqual(@as(usize, 6), findUtf8Boundary(text, 7));
+    try std.testing.expectEqual(@as(usize, 6), findUtf8Boundary(text, 8));
+
+    // Cutting at byte 10 (middle of "界") should give us byte 9 (start of "界")
+    try std.testing.expectEqual(@as(usize, 9), findUtf8Boundary(text, 10));
+}
+
+test "findUtf8Boundary - 4-byte UTF-8" {
+    // Emoji 😀 (F0 9F 98 80) is 4 bytes
+    const text = "ab😀cd";
+    // Byte positions: a=0, b=1, 😀=2-5, c=6, d=7
+
+    try std.testing.expectEqual(@as(usize, 2), findUtf8Boundary(text, 3));
+    try std.testing.expectEqual(@as(usize, 2), findUtf8Boundary(text, 4));
+    try std.testing.expectEqual(@as(usize, 2), findUtf8Boundary(text, 5));
 }
 
 test "TokenBudget.availableForStdin - basic calculation" {
