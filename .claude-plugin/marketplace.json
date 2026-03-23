@@ -11,7 +11,7 @@
       "name": "slm-reminder",
       "source": "./.claude/plugins/slm",
       "description": "Injects slm usage guidelines into context and reminds Claude to use slm for text processing. Shows reminder at session start and after Bash commands produce large (>1KB) outputs.",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "keywords": ["slm", "tokens", "optimization", "bash", "reminder"]
     }
   ]
