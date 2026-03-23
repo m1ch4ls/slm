@@ -312,7 +312,7 @@ pub const ContextHandle = struct {
     ctx: *Context,
     model: *ModelHandle,
 
-    pub fn init(model: *ModelHandle, n_ctx: u32, n_threads: u32, n_batch: u32, flash_attn: bool) !ContextHandle {
+    pub fn init(model: *ModelHandle, n_ctx: u32, n_threads: u32, n_batch: u32, flash_attn: bool, swa_full: bool) !ContextHandle {
         var params = llama_context_default_params();
         params.n_ctx = n_ctx;
         params.n_batch = n_batch;
@@ -321,6 +321,7 @@ pub const ContextHandle = struct {
         params.n_threads = @intCast(n_threads);
         params.n_threads_batch = @intCast(n_threads);
         params.flash_attn_type = if (flash_attn) 1 else 0;
+        params.swa_full = swa_full;
 
         const ctx = llama_init_from_model(model.model, params) orelse return error.ContextCreateFailed;
         return ContextHandle{

@@ -284,7 +284,7 @@ pub fn main() !void {
     defer model.deinit();
 
     // Create context with performance-tuned parameters
-    var ctx = try llama.ContextHandle.init(&model, context_size, n_threads, n_batch, flash_attn);
+    var ctx = try llama.ContextHandle.init(&model, context_size, n_threads, n_batch, flash_attn, false);
     defer ctx.deinit();
 
     log.info("Model loaded successfully", .{});

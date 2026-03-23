@@ -34,6 +34,7 @@ const Config = struct {
     main_gpu: i32,
     n_batch: u32,
     flash_attn: bool,
+    swa_full: bool,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Config) void {
@@ -65,6 +66,7 @@ pub fn readConfig(allocator: std.mem.Allocator) !Config {
     var main_gpu: i32 = 0; // Default to first GPU (discrete GPU), set to -1 to use all GPUs
     var n_batch: u32 = 2048; // Increased default for better throughput
     var flash_attn: bool = true; // Enable flash attention by default for performance
+    var swa_full: bool = false; // Sliding window attention - disabled by default
 
     errdefer {
         if (model_path) |m| allocator.free(m);
@@ -95,6 +97,8 @@ pub fn readConfig(allocator: std.mem.Allocator) !Config {
             n_batch = std.fmt.parseInt(u32, value, 10) catch n_batch;
         } else if (std.mem.eql(u8, key, "flash_attn")) {
             flash_attn = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
+        } else if (std.mem.eql(u8, key, "swa_full")) {
+            swa_full = std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1") or std.mem.eql(u8, value, "yes");
         }
     }
 
@@ -106,6 +110,7 @@ pub fn readConfig(allocator: std.mem.Allocator) !Config {
         .main_gpu = main_gpu,
         .n_batch = n_batch,
         .flash_attn = flash_attn,
+        .swa_full = swa_full,
         .allocator = allocator,
     };
 }
@@ -134,7 +139,7 @@ pub const Daemon = struct {
 
         log.info("Model loaded, creating context...", .{});
 
-        var ctx = try llama.ContextHandle.init(&model, config.context_size, config.n_threads, config.n_batch, config.flash_attn);
+        var ctx = try llama.ContextHandle.init(&model, config.context_size, config.n_threads, config.n_batch, config.flash_attn, config.swa_full);
         errdefer ctx.deinit();
 
         log.info("Context created", .{});
@@ -184,7 +189,7 @@ pub const Daemon = struct {
                 log.err("Failed to create socket directory: {}", .{err});
             }
         };
-        
+
         // Make directory accessible to all users
         const dir_path_z = try self.allocator.dupeZ(u8, dir_path);
         defer self.allocator.free(dir_path_z);
@@ -255,10 +260,10 @@ pub const Daemon = struct {
             return err;
         };
         log.info("Socket bound successfully", .{});
-        
+
         // Make socket accessible to all users
         _ = std.posix.system.chmod(socket_path_z, 0o777);
-        
+
         try std.posix.listen(socket, 1);
 
         log.info("Daemon listening on {s}", .{self.socket_path});

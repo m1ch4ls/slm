@@ -249,7 +249,6 @@ pub const InferenceEngine = struct {
             log.debug("Token budget: n_ctx={d}, prompt={d}, gen={d}, overhead={d}, stdin_budget={d}", .{
                 n_ctx, prompt_tokens, max_gen_tokens, template_overhead, max_stdin_tokens,
             });
-
             if (max_stdin_tokens == 0) break :blk try self.allocator.dupe(u8, "");
             break :blk try tokenizer.truncateForTokenBudget(self.allocator, self.vocab, stdin, max_stdin_tokens);
         } else try self.allocator.dupe(u8, stdin);
