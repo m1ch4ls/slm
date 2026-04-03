@@ -87,9 +87,9 @@ pub fn build(b: *std.Build) void {
     daemon.root_module.link_libc = true;
 
     // Set rpath so the binary can find libraries in the same directory
-    // $ORIGIN is a special ELF value meaning "directory where the binary is located"
-    daemon.root_module.addRPath(.{ .cwd_relative = "$ORIGIN/../lib" });
-    daemon.root_module.addRPath(.{ .cwd_relative = "$ORIGIN" });
+    // Use addRPathSpecial to prevent Zig from normalizing $ORIGIN as a path component
+    daemon.root_module.addRPathSpecial("$ORIGIN/../lib");
+    daemon.root_module.addRPathSpecial("$ORIGIN");
 
     b.installArtifact(daemon);
 
@@ -127,8 +127,9 @@ pub fn build(b: *std.Build) void {
     benchmark.root_module.link_libc = true;
 
     // Set rpath so the binary can find libraries in the same directory
-    benchmark.root_module.addRPath(.{ .cwd_relative = "$ORIGIN/../lib" });
-    benchmark.root_module.addRPath(.{ .cwd_relative = "$ORIGIN" });
+    // Use addRPathSpecial to prevent Zig from normalizing $ORIGIN as a path component
+    benchmark.root_module.addRPathSpecial("$ORIGIN/../lib");
+    benchmark.root_module.addRPathSpecial("$ORIGIN");
 
     b.installArtifact(benchmark);
 
