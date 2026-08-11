@@ -43,6 +43,11 @@ zig-out/bin/slm --help
 The CLI accepts `--base-url`, `--model`, and `--max-tokens`. Requests are sent to
 `<base-url>/chat/completions`; pass a base URL ending in `/v1`, not the full endpoint.
 
+Processing attempts are recorded by default in the per-user state directory. Set an
+absolute `SLM_STATE_DIR` to relocate the store or `SLM_NO_RECORD=1` to disable all
+recording. The finalized JSON/gzip interchange contract is documented in
+[`docs/processing-attempt-store.md`](docs/processing-attempt-store.md).
+
 ## Agent Skill
 
 Print the canonical agent instructions:

@@ -6,6 +6,14 @@ pub const ResolveOptions = struct {
     state_dir: ?[]const u8 = null,
     xdg_state_home: ?[]const u8 = null,
     home: ?[]const u8 = null,
+    failure_point: ?FailurePoint = null,
+};
+
+pub const FailurePoint = enum {
+    capture_sync,
+    final_sync,
+    publication_sync,
+    published_sync,
 };
 
 pub const RequestContext = struct {
@@ -34,6 +42,8 @@ pub const Store = struct {
     root: std.Io.Dir,
     staging: std.Io.Dir,
     attempts: std.Io.Dir,
+    allocated: std.Io.Dir,
+    failure_point: ?FailurePoint,
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, options: ResolveOptions) !Store {
         const root_path = try resolveRoot(allocator, options);
@@ -42,33 +52,48 @@ pub const Store = struct {
         const parent_path = std.fs.path.dirname(root_path) orelse return error.InvalidStateDirectory;
         try std.Io.Dir.cwd().createDirPath(io, parent_path);
         try makeOwnerOnlyDir(std.Io.Dir.cwd(), io, root_path);
+        const parent = try std.Io.Dir.openDirAbsolute(io, parent_path, .{ .follow_symlinks = false });
+        defer parent.close(io);
+        try syncDir(parent, io);
 
         const root = try std.Io.Dir.openDirAbsolute(io, root_path, .{ .follow_symlinks = false });
         errdefer root.close(io);
         try requireOwnerOnly(root, io);
 
         try makeOwnerOnlyDir(root, io, ".staging");
+        try makeOwnerOnlyDir(root, io, ".allocated");
         try makeOwnerOnlyDir(root, io, "attempts");
+        try initializeLockFile(root, io);
+        try syncDir(root, io);
 
-        const staging = try root.openDir(io, ".staging", .{ .follow_symlinks = false });
+        const staging = try root.openDir(io, ".staging", .{ .follow_symlinks = false, .iterate = true });
         errdefer staging.close(io);
         try requireOwnerOnly(staging, io);
 
-        const attempts = try root.openDir(io, "attempts", .{ .follow_symlinks = false });
+        const attempts = try root.openDir(io, "attempts", .{ .follow_symlinks = false, .iterate = true });
         errdefer attempts.close(io);
         try requireOwnerOnly(attempts, io);
 
-        return .{
+        const allocated = try root.openDir(io, ".allocated", .{ .follow_symlinks = false, .iterate = true });
+        errdefer allocated.close(io);
+        try requireOwnerOnly(allocated, io);
+
+        var store: Store = .{
             .allocator = allocator,
             .io = io,
             .root_path = root_path,
             .root = root,
             .staging = staging,
             .attempts = attempts,
+            .allocated = allocated,
+            .failure_point = options.failure_point,
         };
+        try store.cleanupStaging();
+        return store;
     }
 
     pub fn close(self: *Store) void {
+        self.allocated.close(self.io);
         self.attempts.close(self.io);
         self.staging.close(self.io);
         self.root.close(self.io);
@@ -80,41 +105,147 @@ pub const Store = struct {
         const id_text = try std.fmt.allocPrint(self.allocator, "{d}", .{id});
         errdefer self.allocator.free(id_text);
 
+        const allocation_lock = try self.lockAllocation();
+        defer allocation_lock.close(self.io);
         try makeOwnerOnlyDir(self.staging, self.io, id_text);
         errdefer self.staging.deleteTree(self.io, id_text) catch {};
         const dir = try self.staging.openDir(self.io, id_text, .{ .follow_symlinks = false });
         errdefer dir.close(self.io);
+        const process_lock = try dir.createFile(self.io, ".lock", .{
+            .exclusive = true,
+            .lock = .exclusive,
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+        });
+        errdefer process_lock.close(self.io);
+        try process_lock.sync(self.io);
+        try syncDir(dir, self.io);
+        try syncDir(self.staging, self.io);
 
         return .{
             .store = self,
             .id = id,
             .id_text = id_text,
             .dir = dir,
+            .process_lock = process_lock,
             .context = context,
             .started_at_utc = started_at_utc,
         };
     }
 
     fn allocateId(self: *Store) !u64 {
-        var next: u64 = 1;
-        if (self.root.openFile(self.io, ".next-id", .{})) |file| {
+        const allocation_lock = try self.lockAllocation();
+        defer allocation_lock.close(self.io);
+
+        var next = if (self.root.openFile(self.io, ".next-id", .{})) |file| next: {
             defer file.close(self.io);
             var buffer: [32]u8 = undefined;
             const length = try file.readPositionalAll(self.io, &buffer, 0);
-            next = try std.fmt.parseInt(u64, std.mem.trim(u8, buffer[0..length], "\r\n "), 10);
+            break :next std.fmt.parseInt(
+                u64,
+                std.mem.trim(u8, buffer[0..length], "\r\n "),
+                10,
+            ) catch try self.recoverNextId();
         } else |err| switch (err) {
+            error.FileNotFound => try self.recoverNextId(),
+            else => return err,
+        };
+
+        while (!try self.reserveId(next)) next = try self.recoverNextId();
+
+        self.root.deleteFile(self.io, ".next-id.tmp") catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
-        }
-
-        const file = try self.root.createFile(self.io, ".next-id", .{
+        };
+        const file = try self.root.createFile(self.io, ".next-id.tmp", .{
+            .exclusive = true,
             .permissions = std.Io.File.Permissions.fromMode(0o600),
         });
         defer file.close(self.io);
         var buffer: [32]u8 = undefined;
         const text = try std.fmt.bufPrint(&buffer, "{d}\n", .{try std.math.add(u64, next, 1)});
         try file.writeStreamingAll(self.io, text);
+        try file.sync(self.io);
+        try self.root.rename(".next-id.tmp", self.root, ".next-id", self.io);
+        try syncDir(self.root, self.io);
         return next;
+    }
+
+    fn lockAllocation(self: *Store) !std.Io.File {
+        return self.root.openFile(self.io, ".allocation.lock", .{
+            .mode = .read_write,
+            .lock = .exclusive,
+            .follow_symlinks = false,
+        });
+    }
+
+    fn reserveId(self: *Store, id: u64) !bool {
+        const marker_name = try std.fmt.allocPrint(self.allocator, "{d}", .{id});
+        defer self.allocator.free(marker_name);
+        const marker = self.allocated.createFile(self.io, marker_name, .{
+            .exclusive = true,
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+        }) catch |err| switch (err) {
+            error.PathAlreadyExists => return false,
+            else => return err,
+        };
+        defer marker.close(self.io);
+        try marker.sync(self.io);
+        try syncDir(self.allocated, self.io);
+        return true;
+    }
+
+    fn recoverNextId(self: *Store) !u64 {
+        var maximum: u64 = 0;
+        var allocated_iterator = self.allocated.iterate();
+        while (try allocated_iterator.next(self.io)) |entry| {
+            const id = std.fmt.parseInt(u64, entry.name, 10) catch continue;
+            maximum = @max(maximum, id);
+        }
+        var attempts_iterator = self.attempts.iterate();
+        while (try attempts_iterator.next(self.io)) |entry| {
+            if (entry.kind != .directory) continue;
+            const id = std.fmt.parseInt(u64, entry.name, 10) catch continue;
+            maximum = @max(maximum, id);
+        }
+        var staging_iterator = self.staging.iterate();
+        while (try staging_iterator.next(self.io)) |entry| {
+            if (entry.kind != .directory) continue;
+            const id = std.fmt.parseInt(u64, entry.name, 10) catch continue;
+            maximum = @max(maximum, id);
+        }
+        return std.math.add(u64, maximum, 1);
+    }
+
+    fn cleanupStaging(self: *Store) !void {
+        const allocation_lock = try self.lockAllocation();
+        defer allocation_lock.close(self.io);
+
+        var iterator = self.staging.iterate();
+        while (try iterator.next(self.io)) |entry| {
+            if (entry.kind != .directory) continue;
+            const lock_path = try std.fmt.allocPrint(self.allocator, "{s}/.lock", .{entry.name});
+            defer self.allocator.free(lock_path);
+            const process_lock = self.staging.openFile(self.io, lock_path, .{
+                .mode = .read_write,
+                .lock = .exclusive,
+                .lock_nonblocking = true,
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.WouldBlock => continue,
+                error.FileNotFound => {
+                    try self.staging.deleteTree(self.io, entry.name);
+                    continue;
+                },
+                else => return err,
+            };
+            process_lock.close(self.io);
+            try self.staging.deleteTree(self.io, entry.name);
+        }
+        try syncDir(self.staging, self.io);
+    }
+
+    fn maybeFail(self: Store, point: FailurePoint) !void {
+        if (self.failure_point == point) return error.InjectedStorageFailure;
     }
 };
 
@@ -123,11 +254,13 @@ pub const Attempt = struct {
     id: u64,
     id_text: []u8,
     dir: std.Io.Dir,
+    process_lock: std.Io.File,
     context: RequestContext,
     started_at_utc: []const u8,
     source_byte_count: ?u64 = null,
     source_utf8_valid: ?bool = null,
     dir_open: bool = true,
+    process_lock_open: bool = true,
     finalized: bool = false,
 
     pub fn captureSource(self: *Attempt, reader: *std.Io.Reader) !source_input.Capture {
@@ -154,6 +287,9 @@ pub const Attempt = struct {
         errdefer captured.deinit(self.store.allocator);
         try gzip.finish();
         try file_writer.interface.flush();
+        try self.store.maybeFail(.capture_sync);
+        try file.sync(self.store.io);
+        try syncDir(self.dir, self.store.io);
 
         self.source_byte_count = captured.byte_count;
         self.source_utf8_valid = captured.utf8_valid;
@@ -251,17 +387,40 @@ pub const Attempt = struct {
         });
         defer metadata_file.close(self.store.io);
         try metadata_file.writeStreamingAll(self.store.io, json);
+        try metadata_file.sync(self.store.io);
+        try syncDir(self.dir, self.store.io);
+        try self.store.maybeFail(.final_sync);
 
+        const allocation_lock = try self.store.lockAllocation();
+        defer allocation_lock.close(self.store.io);
+        self.process_lock.close(self.store.io);
+        self.process_lock_open = false;
+        try self.dir.deleteFile(self.store.io, ".lock");
+        try syncDir(self.dir, self.store.io);
         self.dir.close(self.store.io);
         self.dir_open = false;
-        try self.store.staging.rename(self.id_text, self.store.attempts, self.id_text, self.store.io);
+        try syncDir(self.store.staging, self.store.io);
+        try syncDir(self.store.attempts, self.store.io);
+        try self.store.maybeFail(.publication_sync);
+        try self.store.staging.renamePreserve(self.id_text, self.store.attempts, self.id_text, self.store.io);
         self.finalized = true;
+        try self.store.maybeFail(.published_sync);
+        try syncDir(self.store.staging, self.store.io);
+        try syncDir(self.store.attempts, self.store.io);
     }
 
     pub fn deinit(self: *Attempt) void {
         if (!self.finalized) {
+            if (self.process_lock_open) {
+                self.process_lock.close(self.store.io);
+                self.process_lock_open = false;
+            }
             if (self.dir_open) self.dir.close(self.store.io);
-            self.store.staging.deleteTree(self.store.io, self.id_text) catch {};
+            if (self.store.lockAllocation()) |allocation_lock| {
+                defer allocation_lock.close(self.store.io);
+                self.store.staging.deleteTree(self.store.io, self.id_text) catch {};
+                syncDir(self.store.staging, self.store.io) catch {};
+            } else |_| {}
         }
         self.store.allocator.free(self.id_text);
     }
@@ -295,6 +454,21 @@ fn requireOwnerOnly(dir: std.Io.Dir, io: std.Io) !void {
     if (stat.permissions.toMode() & 0o077 != 0) return error.UnsafeStateDirectoryPermissions;
 }
 
+fn initializeLockFile(root: std.Io.Dir, io: std.Io) !void {
+    const file = try root.createFile(io, ".allocation.lock", .{
+        .truncate = false,
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
+    });
+    defer file.close(io);
+    try file.sync(io);
+}
+
+fn syncDir(dir: std.Io.Dir, io: std.Io) !void {
+    const file = try dir.openFile(io, ".", .{ .allow_directory = true });
+    defer file.close(io);
+    try file.sync(io);
+}
+
 fn writeGzip(dir: std.Io.Dir, io: std.Io, name: []const u8, bytes: []const u8) !void {
     const file = try dir.createFile(io, name, .{
         .exclusive = true,
@@ -314,6 +488,7 @@ fn writeGzip(dir: std.Io.Dir, io: std.Io, name: []const u8, bytes: []const u8) !
     try gzip.writer.writeAll(bytes);
     try gzip.finish();
     try file_writer.interface.flush();
+    try file.sync(io);
 }
 
 test "resolveRoot follows override, XDG, and home precedence" {

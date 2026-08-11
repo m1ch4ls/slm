@@ -69,6 +69,7 @@ fn run(init: std.process.Init) !void {
             .state_dir = try envOptional(init, "SLM_STATE_DIR"),
             .xdg_state_home = try envOptional(init, "XDG_STATE_HOME"),
             .home = try envOptional(init, "HOME"),
+            .failure_point = try storageFailurePoint(init),
         })
     else
         null;
@@ -187,6 +188,12 @@ fn recordingEnabled(init: std.process.Init) !bool {
     if (std.mem.eql(u8, value, "1")) return false;
     try writeStderr(init.io, "SLM_NO_RECORD must be exactly 1 when set\n", .{});
     return error.InvalidRecordingPolicy;
+}
+
+fn storageFailurePoint(init: std.process.Init) !?attempt_store.FailurePoint {
+    const value = try envOptional(init, "SLM_TEST_STORAGE_FAILURE") orelse return null;
+    return std.meta.stringToEnum(attempt_store.FailurePoint, value) orelse
+        error.InvalidStorageFailurePoint;
 }
 
 fn envOptional(init: std.process.Init, name: []const u8) !?[]const u8 {
