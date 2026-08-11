@@ -48,3 +48,29 @@ pub const Completion = struct {
         if (self.finish_reason) |value| allocator.free(value);
     }
 };
+
+pub const RequestFailure = union(enum) {
+    network: []const u8,
+    http_status: u16,
+};
+
+pub const ResponseInvalidReason = enum {
+    malformed_json,
+    empty_choices,
+    missing_output,
+    response_too_large,
+    ambiguous_output,
+};
+
+pub const CompletionResult = union(enum) {
+    completion: Completion,
+    request_failed: RequestFailure,
+    response_invalid: ResponseInvalidReason,
+
+    pub fn deinit(self: *CompletionResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .completion => |*completion| completion.deinit(allocator),
+            .request_failed, .response_invalid => {},
+        }
+    }
+};

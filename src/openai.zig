@@ -41,7 +41,7 @@ pub fn complete(
     allocator: std.mem.Allocator,
     io: std.Io,
     options: RequestOptions,
-) !model.Completion {
+) !model.CompletionResult {
     const user_content = try formatUserContent(allocator, options.prompt, options.input);
     defer allocator.free(user_content);
 
@@ -81,24 +81,41 @@ pub fn complete(
     defer client.deinit();
 
     const uri = try std.Uri.parse(endpoint);
-    var request = try client.request(.POST, uri, .{
+    var request = client.request(.POST, uri, .{
         .extra_headers = headers_buffer[0..header_count],
-    });
+    }) catch |err| return requestFailed(err);
     defer request.deinit();
 
-    try request.sendBodyComplete(payload);
+    request.sendBodyComplete(payload) catch |err| return requestFailed(err);
 
     var redirect_buffer: [8 * 1024]u8 = undefined;
-    var response = try request.receiveHead(&redirect_buffer);
-    var response_buffer: [8 * 1024]u8 = undefined;
-    const body = try response.reader(&response_buffer).allocRemaining(allocator, .limited(16 * 1024 * 1024));
-    defer allocator.free(body);
+    var response = request.receiveHead(&redirect_buffer) catch |err| return requestFailed(err);
 
     if (response.head.status.class() != .success) {
-        return error.ApiRequestFailed;
+        return .{ .request_failed = .{ .http_status = @intFromEnum(response.head.status) } };
     }
 
-    return parseCompletion(allocator, body);
+    var response_buffer: [8 * 1024]u8 = undefined;
+    const body = response.reader(&response_buffer).allocRemaining(allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+        error.StreamTooLong => return .{ .response_invalid = .response_too_large },
+        error.OutOfMemory => return err,
+        else => return requestFailed(err),
+    };
+    defer allocator.free(body);
+
+    const completion = parseCompletion(allocator, body) catch |err| return .{
+        .response_invalid = switch (err) {
+            error.EmptyChoices => .empty_choices,
+            error.EmptyContent => .missing_output,
+            error.AmbiguousOutput => .ambiguous_output,
+            else => .malformed_json,
+        },
+    };
+    return .{ .completion = completion };
+}
+
+fn requestFailed(err: anyerror) model.CompletionResult {
+    return .{ .request_failed = .{ .network = @errorName(err) } };
 }
 
 /// Builds the user message while preserving token-saver's instruction/input tags.
@@ -205,5 +222,16 @@ test "parseCompletion rejects ambiguous output" {
     try std.testing.expectError(
         error.AmbiguousOutput,
         parseCompletion(std.testing.allocator, body),
+    );
+}
+
+test "parseCompletion rejects malformed JSON and missing output" {
+    try std.testing.expectError(
+        error.UnexpectedEndOfInput,
+        parseCompletion(std.testing.allocator, "{"),
+    );
+    try std.testing.expectError(
+        error.EmptyContent,
+        parseCompletion(std.testing.allocator, "{\"choices\":[{\"message\":{}}]}"),
     );
 }

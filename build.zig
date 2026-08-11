@@ -37,8 +37,12 @@ pub fn build(b: *std.Build) void {
     const run_process_test = b.addSystemCommand(&.{ "bun", "tests/process-success.js" });
     run_process_test.addArtifactArg(executable);
 
+    const run_failure_process_test = b.addSystemCommand(&.{ "bun", "tests/process-failures.js" });
+    run_failure_process_test.addArtifactArg(executable);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_skill_test.step);
     test_step.dependOn(&run_process_test.step);
+    test_step.dependOn(&run_failure_process_test.step);
 }

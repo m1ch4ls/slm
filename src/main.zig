@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) void {
             error.InvalidArguments,
             error.MissingEnvironmentVariable,
             error.MissingPrompt,
-            error.ApiRequestFailed,
+            error.ModelFailureReported,
             => {},
             else => writeStderr(init.io, "slm: {s}\n", .{@errorName(err)}) catch {},
         }
@@ -92,7 +92,7 @@ fn run(init: std.process.Init) !void {
     if (attempt) |*value| try value.captureSource(input);
     const source_finished = std.Io.Clock.awake.now(init.io);
 
-    var completion = try openai.complete(allocator, init.io, .{
+    var result = try openai.complete(allocator, init.io, .{
         .base_url = base_url,
         .api_key = api_key,
         .model = model_id,
@@ -100,20 +100,43 @@ fn run(init: std.process.Init) !void {
         .input = input,
         .max_tokens = config.max_tokens,
     });
-    defer completion.deinit(allocator);
+    defer result.deinit(allocator);
     const model_finished = std.Io.Clock.awake.now(init.io);
-
-    if (attempt) |*value| try value.finalizeCompleted(completion, .{
+    const durations: attempt_store.Durations = .{
         .source_ingestion = @intCast(monotonic_start.durationTo(source_finished).nanoseconds),
         .model_request = @intCast(source_finished.durationTo(model_finished).nanoseconds),
         .total = @intCast(monotonic_start.durationTo(model_finished).nanoseconds),
-    });
+    };
 
-    const output = completion.output.bytes();
-    const stdout = std.Io.File.stdout();
-    try stdout.writeStreamingAll(init.io, output);
-    if (output.len == 0 or output[output.len - 1] != '\n') {
-        try stdout.writeStreamingAll(init.io, "\n");
+    switch (result) {
+        .completion => |completion| {
+            if (attempt) |*value| try value.finalizeCompleted(completion, durations);
+
+            const output = completion.output.bytes();
+            const stdout = std.Io.File.stdout();
+            try stdout.writeStreamingAll(init.io, output);
+            if (output.len == 0 or output[output.len - 1] != '\n') {
+                try stdout.writeStreamingAll(init.io, "\n");
+            }
+        },
+        .request_failed => |failure| {
+            if (attempt) |*value| {
+                try value.finalizeRequestFailed(failure, durations);
+                try writeStderr(init.io, "slm: model request failed (attempt {d})\n", .{value.attemptId()});
+            } else {
+                try writeStderr(init.io, "slm: model request failed\n", .{});
+            }
+            return error.ModelFailureReported;
+        },
+        .response_invalid => |reason| {
+            if (attempt) |*value| {
+                try value.finalizeResponseInvalid(reason, durations);
+                try writeStderr(init.io, "slm: invalid model response (attempt {d})\n", .{value.attemptId()});
+            } else {
+                try writeStderr(init.io, "slm: invalid model response\n", .{});
+            }
+            return error.ModelFailureReported;
+        },
     }
 }
 

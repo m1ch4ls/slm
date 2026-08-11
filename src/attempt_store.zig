@@ -20,6 +20,12 @@ pub const Durations = struct {
     total: u64,
 };
 
+const FailureFacts = struct {
+    kind: []const u8,
+    http_status: ?u16 = null,
+    error_name: ?[]const u8 = null,
+};
+
 pub const Store = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -132,11 +138,53 @@ pub const Attempt = struct {
         completion: model.Completion,
         durations: Durations,
     ) !void {
-        const source_byte_count = self.source_byte_count orelse return error.SourceNotCaptured;
         const output = completion.output.bytes();
         try writeGzip(self.dir, self.store.io, "model-output.gz", output);
 
         const usage: ?model.Usage = if (completion.usage.isPresent()) completion.usage else null;
+        try self.finalize(.{
+            .kind = "completed",
+            .model_output = .{
+                .kind = completion.output.kind(),
+                .byte_count = output.len,
+                .finish_reason = completion.finish_reason,
+                .usage = usage,
+            },
+        }, durations);
+    }
+
+    pub fn finalizeRequestFailed(
+        self: *Attempt,
+        failure: model.RequestFailure,
+        durations: Durations,
+    ) !void {
+        const facts: FailureFacts = switch (failure) {
+            .network => |error_name| .{ .kind = "network", .error_name = error_name },
+            .http_status => |status| .{ .kind = "http_status", .http_status = status },
+        };
+        try self.finalize(.{
+            .kind = "model_request_failed",
+            .failure = facts,
+        }, durations);
+    }
+
+    pub fn finalizeResponseInvalid(
+        self: *Attempt,
+        reason: model.ResponseInvalidReason,
+        durations: Durations,
+    ) !void {
+        try self.finalize(.{
+            .kind = "model_response_invalid",
+            .reason = @tagName(reason),
+        }, durations);
+    }
+
+    pub fn attemptId(self: Attempt) u64 {
+        return self.id;
+    }
+
+    fn finalize(self: *Attempt, outcome: anytype, durations: Durations) !void {
+        const source_byte_count = self.source_byte_count orelse return error.SourceNotCaptured;
         const metadata = .{
             .schema_version = model.schema_version,
             .request_format_version = model.request_format_version,
@@ -154,15 +202,7 @@ pub const Attempt = struct {
                 .byte_count = source_byte_count,
                 .utf8_valid = true,
             },
-            .outcome = .{
-                .kind = "completed",
-                .model_output = .{
-                    .kind = completion.output.kind(),
-                    .byte_count = output.len,
-                    .finish_reason = completion.finish_reason,
-                    .usage = usage,
-                },
-            },
+            .outcome = outcome,
         };
         const json = try std.json.Stringify.valueAlloc(self.store.allocator, metadata, .{
             .emit_null_optional_fields = false,
