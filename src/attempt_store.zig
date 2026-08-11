@@ -1,5 +1,6 @@
 const std = @import("std");
 const model = @import("model.zig");
+const source_input = @import("source_input.zig");
 
 pub const ResolveOptions = struct {
     state_dir: ?[]const u8 = null,
@@ -125,12 +126,38 @@ pub const Attempt = struct {
     context: RequestContext,
     started_at_utc: []const u8,
     source_byte_count: ?u64 = null,
+    source_utf8_valid: ?bool = null,
     dir_open: bool = true,
     finalized: bool = false,
 
-    pub fn captureSource(self: *Attempt, bytes: []const u8) !void {
-        try writeGzip(self.dir, self.store.io, "source-input.gz", bytes);
-        self.source_byte_count = bytes.len;
+    pub fn captureSource(self: *Attempt, reader: *std.Io.Reader) !source_input.Capture {
+        const file = try self.dir.createFile(self.store.io, "source-input.gz", .{
+            .exclusive = true,
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+        });
+        defer file.close(self.store.io);
+
+        var file_buffer: [64 * 1024]u8 = undefined;
+        var file_writer = file.writer(self.store.io, &file_buffer);
+        var compression_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+        var gzip = try std.compress.flate.Compress.init(
+            &file_writer.interface,
+            &compression_buffer,
+            .gzip,
+            .level_1,
+        );
+        var captured = try source_input.capture(self.store.allocator, reader, .{
+            .processing_byte_limit = model.processing_byte_limit,
+            .drain_oversized = true,
+            .sink = &gzip.writer,
+        });
+        errdefer captured.deinit(self.store.allocator);
+        try gzip.finish();
+        try file_writer.interface.flush();
+
+        self.source_byte_count = captured.byte_count;
+        self.source_utf8_valid = captured.utf8_valid;
+        return captured;
     }
 
     pub fn finalizeCompleted(
@@ -179,12 +206,21 @@ pub const Attempt = struct {
         }, durations);
     }
 
+    pub fn finalizeSourceInputTooLarge(self: *Attempt, durations: Durations) !void {
+        try self.finalize(.{ .kind = "source_input_too_large" }, durations);
+    }
+
+    pub fn finalizeSourceInputInvalid(self: *Attempt, durations: Durations) !void {
+        try self.finalize(.{ .kind = "source_input_invalid" }, durations);
+    }
+
     pub fn attemptId(self: Attempt) u64 {
         return self.id;
     }
 
     fn finalize(self: *Attempt, outcome: anytype, durations: Durations) !void {
         const source_byte_count = self.source_byte_count orelse return error.SourceNotCaptured;
+        const source_utf8_valid = self.source_utf8_valid orelse return error.SourceNotCaptured;
         const metadata = .{
             .schema_version = model.schema_version,
             .request_format_version = model.request_format_version,
@@ -200,7 +236,7 @@ pub const Attempt = struct {
             },
             .source_input = .{
                 .byte_count = source_byte_count,
-                .utf8_valid = true,
+                .utf8_valid = source_utf8_valid,
             },
             .outcome = outcome,
         };
@@ -335,7 +371,9 @@ test "completed attempts publish structured metadata and exact gzip payloads" {
 
     var attempt = try store.begin(context, "2026-08-11T12:34:56.789Z");
     defer attempt.deinit();
-    try attempt.captureSource(source);
+    var source_reader: std.Io.Reader = .fixed(source);
+    var captured = try attempt.captureSource(&source_reader);
+    defer captured.deinit(allocator);
     try attempt.finalizeCompleted(completion, .{
         .source_ingestion = 10,
         .model_request = 20,
@@ -446,6 +484,37 @@ test "store creates owner-only paths and rejects an unsafe existing root" {
     try std.testing.expectError(
         error.UnsafeStateDirectoryPermissions,
         Store.open(allocator, io, .{ .state_dir = unsafe_path }),
+    );
+}
+
+test "failed Source input capture publishes no attempt" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_length = try temporary.dir.realPath(io, &path_buffer);
+    const root_path = try std.fs.path.join(allocator, &.{ path_buffer[0..path_length], "store" });
+    defer allocator.free(root_path);
+
+    var store = try Store.open(allocator, io, .{ .state_dir = root_path });
+    defer store.close();
+    const context: RequestContext = .{
+        .task_instruction = "process",
+        .runtime_system_prompt = "rules",
+        .model_id = "test-model",
+        .max_tokens = 10,
+    };
+
+    var attempt = try store.begin(context, "2026-08-11T12:34:56.789Z");
+    var failing_reader: std.Io.Reader = .failing;
+    try std.testing.expectError(error.ReadFailed, attempt.captureSource(&failing_reader));
+    attempt.deinit();
+
+    try std.testing.expectError(
+        error.FileNotFound,
+        store.attempts.openDir(io, "1", .{ .follow_symlinks = false }),
     );
 }
 

@@ -4,6 +4,7 @@ const attempt_store = @import("attempt_store.zig");
 const cli = @import("cli.zig");
 const model = @import("model.zig");
 const openai = @import("openai.zig");
+const source_input = @import("source_input.zig");
 
 const skill = build_options.skill;
 
@@ -15,6 +16,8 @@ pub fn main(init: std.process.Init) void {
             error.MissingEnvironmentVariable,
             error.MissingPrompt,
             error.ModelFailureReported,
+            error.SourceFailureReported,
+            error.InvalidTaskInstruction,
             => {},
             else => writeStderr(init.io, "slm: {s}\n", .{@errorName(err)}) catch {},
         }
@@ -46,6 +49,10 @@ fn run(init: std.process.Init) !void {
         try writeStderr(init.io, "missing required argument: <prompt>\n\n{s}", .{help});
         return error.MissingPrompt;
     };
+    if (!std.unicode.utf8ValidateSlice(prompt)) {
+        try writeStderr(init.io, "slm: task instruction is not valid UTF-8\n", .{});
+        return error.InvalidTaskInstruction;
+    }
 
     const base_url = config.base_url orelse
         try envOrDefault(init, "OPENAI_BASE_URL", cli.default_base_url);
@@ -87,23 +94,58 @@ fn run(init: std.process.Init) !void {
 
     var stdin_buffer: [8 * 1024]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().reader(init.io, &stdin_buffer);
-    const input = try stdin_reader.interface.allocRemaining(allocator, .limited(model.processing_byte_limit));
-    defer allocator.free(input);
-    if (attempt) |*value| try value.captureSource(input);
+    var captured = if (attempt) |*value|
+        try value.captureSource(&stdin_reader.interface)
+    else
+        try source_input.capture(allocator, &stdin_reader.interface, .{
+            .processing_byte_limit = model.processing_byte_limit,
+            .drain_oversized = false,
+        });
+    defer captured.deinit(allocator);
     const source_finished = std.Io.Clock.awake.now(init.io);
+    const source_duration: u64 = @intCast(monotonic_start.durationTo(source_finished).nanoseconds);
+
+    if (captured.too_large) {
+        const durations: attempt_store.Durations = .{
+            .source_ingestion = source_duration,
+            .model_request = 0,
+            .total = source_duration,
+        };
+        if (attempt) |*value| {
+            try value.finalizeSourceInputTooLarge(durations);
+            try writeStderr(init.io, "slm: source input too large (attempt {d})\n", .{value.attemptId()});
+        } else {
+            try writeStderr(init.io, "slm: source input too large\n", .{});
+        }
+        return error.SourceFailureReported;
+    }
+    if (!captured.utf8_valid) {
+        const durations: attempt_store.Durations = .{
+            .source_ingestion = source_duration,
+            .model_request = 0,
+            .total = source_duration,
+        };
+        if (attempt) |*value| {
+            try value.finalizeSourceInputInvalid(durations);
+            try writeStderr(init.io, "slm: source input is not valid UTF-8 (attempt {d})\n", .{value.attemptId()});
+        } else {
+            try writeStderr(init.io, "slm: source input is not valid UTF-8\n", .{});
+        }
+        return error.SourceFailureReported;
+    }
 
     var result = try openai.complete(allocator, init.io, .{
         .base_url = base_url,
         .api_key = api_key,
         .model = model_id,
         .prompt = prompt,
-        .input = input,
+        .input = captured.processable,
         .max_tokens = config.max_tokens,
     });
     defer result.deinit(allocator);
     const model_finished = std.Io.Clock.awake.now(init.io);
     const durations: attempt_store.Durations = .{
-        .source_ingestion = @intCast(monotonic_start.durationTo(source_finished).nanoseconds),
+        .source_ingestion = source_duration,
         .model_request = @intCast(source_finished.durationTo(model_finished).nanoseconds),
         .total = @intCast(monotonic_start.durationTo(model_finished).nanoseconds),
     };
@@ -246,6 +288,7 @@ test {
     _ = cli;
     _ = model;
     _ = openai;
+    _ = source_input;
 }
 
 test "skill command requires an exact invocation" {
