@@ -1,6 +1,7 @@
 const std = @import("std");
+const model = @import("model.zig");
 
-const system_prompt = @embedFile("system.txt");
+pub const system_prompt = @embedFile("system.txt");
 
 pub const RequestOptions = struct {
     base_url: []const u8,
@@ -18,21 +19,29 @@ const Message = struct {
 
 const CompletionResponse = struct {
     choices: []const Choice,
+    usage: ?Usage = null,
 
     const Choice = struct {
+        finish_reason: ?[]const u8 = null,
         message: struct {
             content: ?[]const u8 = null,
             refusal: ?[]const u8 = null,
         },
     };
+
+    const Usage = struct {
+        prompt_tokens: ?u64 = null,
+        completion_tokens: ?u64 = null,
+        total_tokens: ?u64 = null,
+    };
 };
 
-/// Calls an OpenAI-compatible chat completions endpoint and returns owned text.
+/// Calls an OpenAI-compatible chat completions endpoint and returns an owned completion.
 pub fn complete(
     allocator: std.mem.Allocator,
     io: std.Io,
     options: RequestOptions,
-) ![]u8 {
+) !model.Completion {
     const user_content = try formatUserContent(allocator, options.prompt, options.input);
     defer allocator.free(user_content);
 
@@ -86,7 +95,6 @@ pub fn complete(
     defer allocator.free(body);
 
     if (response.head.status.class() != .success) {
-        std.log.err("API returned {d}: {s}", .{ @intFromEnum(response.head.status), body });
         return error.ApiRequestFailed;
     }
 
@@ -109,17 +117,42 @@ fn chatCompletionsUrl(allocator: std.mem.Allocator, base_url: []const u8) ![]u8 
     return std.fmt.allocPrint(allocator, "{s}/chat/completions", .{trimmed});
 }
 
-/// Parses the first assistant choice and returns caller-owned content.
-fn parseCompletion(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
+/// Parses the first assistant choice into an unambiguous caller-owned output.
+fn parseCompletion(allocator: std.mem.Allocator, body: []const u8) !model.Completion {
     var parsed = try std.json.parseFromSlice(CompletionResponse, allocator, body, .{
         .ignore_unknown_fields = true,
     });
     defer parsed.deinit();
 
     if (parsed.value.choices.len == 0) return error.EmptyChoices;
-    const message = parsed.value.choices[0].message;
-    const content = message.content orelse message.refusal orelse return error.EmptyContent;
-    return allocator.dupe(u8, content);
+    const choice = parsed.value.choices[0];
+    const message = choice.message;
+    if (message.content != null and message.refusal != null) return error.AmbiguousOutput;
+
+    var output: model.Output = if (message.content) |content|
+        .{ .content = try allocator.dupe(u8, content) }
+    else if (message.refusal) |refusal|
+        .{ .refusal = try allocator.dupe(u8, refusal) }
+    else
+        return error.EmptyContent;
+    errdefer output.deinit(allocator);
+
+    const finish_reason = if (choice.finish_reason) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+
+    const usage: model.Usage = if (parsed.value.usage) |value| .{
+        .prompt_tokens = value.prompt_tokens,
+        .completion_tokens = value.completion_tokens,
+        .total_tokens = value.total_tokens,
+    } else .{};
+
+    return .{
+        .output = output,
+        .finish_reason = finish_reason,
+        .usage = usage,
+    };
 }
 
 test "formatUserContent tags piped input" {
@@ -136,15 +169,41 @@ test "parseCompletion ignores unknown response fields" {
     const body =
         \\{"id":"chatcmpl-1","choices":[{"index":0,"message":{"role":"assistant","content":"result"}}]}
     ;
-    const content = try parseCompletion(std.testing.allocator, body);
-    defer std.testing.allocator.free(content);
+    var completion = try parseCompletion(std.testing.allocator, body);
+    defer completion.deinit(std.testing.allocator);
 
-    try std.testing.expectEqualStrings("result", content);
+    try std.testing.expectEqualStrings("result", completion.output.bytes());
+    try std.testing.expectEqualStrings("content", completion.output.kind());
 }
 
 test "parseCompletion reports missing choices" {
     try std.testing.expectError(
         error.EmptyChoices,
         parseCompletion(std.testing.allocator, "{\"choices\":[]}"),
+    );
+}
+
+test "parseCompletion preserves refusal and optional provider facts" {
+    const body =
+        \\{"choices":[{"message":{"content":null,"refusal":"cannot comply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"total_tokens":15}}
+    ;
+    var completion = try parseCompletion(std.testing.allocator, body);
+    defer completion.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("refusal", completion.output.kind());
+    try std.testing.expectEqualStrings("cannot comply", completion.output.bytes());
+    try std.testing.expectEqualStrings("stop", completion.finish_reason.?);
+    try std.testing.expectEqual(@as(?u64, 12), completion.usage.prompt_tokens);
+    try std.testing.expectEqual(@as(?u64, null), completion.usage.completion_tokens);
+    try std.testing.expectEqual(@as(?u64, 15), completion.usage.total_tokens);
+}
+
+test "parseCompletion rejects ambiguous output" {
+    const body =
+        \\{"choices":[{"message":{"content":"answer","refusal":"no"}}]}
+    ;
+    try std.testing.expectError(
+        error.AmbiguousOutput,
+        parseCompletion(std.testing.allocator, body),
     );
 }

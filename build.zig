@@ -34,7 +34,11 @@ pub fn build(b: *std.Build) void {
     run_skill_test.expectStdOutEqual(@embedFile("SKILL.md"));
     run_skill_test.expectStdErrEqual("");
 
+    const run_process_test = b.addSystemCommand(&.{ "bun", "tests/process-success.js" });
+    run_process_test.addArtifactArg(executable);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_skill_test.step);
+    test_step.dependOn(&run_process_test.step);
 }
