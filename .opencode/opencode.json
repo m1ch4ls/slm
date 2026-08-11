@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "references": {
+    "zig-0.16": {
+      "repository": "ziglang/zig",
+      "branch": "master",
+      "description": "Use for Zig 0.16 standard library APIs, compiler behavior, and implementation details"
+    }
+  }
+}

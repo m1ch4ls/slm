@@ -1,0 +1,4 @@
+[tools]
+python = "3.12"
+zig = "0.16.0"
+zls = "latest"
