@@ -82,6 +82,7 @@ pub fn complete(
 
     const uri = try std.Uri.parse(endpoint);
     var request = client.request(.POST, uri, .{
+        .headers = .{ .accept_encoding = .{ .override = "gzip" } },
         .extra_headers = headers_buffer[0..header_count],
     }) catch |err| return requestFailed(err);
     defer request.deinit();
@@ -96,7 +97,13 @@ pub fn complete(
     }
 
     var response_buffer: [8 * 1024]u8 = undefined;
-    const body = response.reader(&response_buffer).allocRemaining(allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+    var decompress: std.http.Decompress = undefined;
+    var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+    const body = response.readerDecompressing(
+        &response_buffer,
+        &decompress,
+        &decompress_buffer,
+    ).allocRemaining(allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
         error.StreamTooLong => return .{ .response_invalid = .response_too_large },
         error.OutOfMemory => return err,
         else => return requestFailed(err),

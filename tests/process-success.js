@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 
 const executable = process.argv[2];
 if (!executable) throw new Error("missing slm executable path");
@@ -16,9 +17,10 @@ const server = Bun.serve({
     requestCount += 1;
     assertEqual(body.model, "fixture-model", "effective model request");
     assertEqual(body.max_tokens, 77, "max_tokens request");
+    assertEqual(request.headers.get("accept-encoding"), "gzip", "accepted encoding");
 
     if (requestCount === 1) {
-      return Response.json({
+      const response = {
         ignored: "provider field",
         choices: [
           {
@@ -27,6 +29,12 @@ const server = Bun.serve({
           },
         ],
         usage: { prompt_tokens: 9, total_tokens: 12 },
+      };
+      return new Response(gzipSync(JSON.stringify(response)), {
+        headers: {
+          "content-encoding": "gzip",
+          "content-type": "application/json",
+        },
       });
     }
 
