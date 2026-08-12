@@ -2,3 +2,18 @@
 python = "3.12"
 zig = "0.16.0"
 zls = "latest"
+
+[tasks.build-debug]
+run = "zig build -Doptimize=Debug"
+
+[tasks.build-release]
+run = "zig build -Doptimize=ReleaseFast"
+
+[tasks.build-release-small]
+run = "zig build -Doptimize=ReleaseSmall"
+
+[tasks.test]
+run = "zig build test"
+
+[tasks.fmt]
+run = "zig fmt build.zig src"
