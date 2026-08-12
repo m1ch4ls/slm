@@ -35,29 +35,22 @@ pub fn build(b: *std.Build) void {
     run_skill_test.expectStdOutEqual(@embedFile("SKILL.md"));
     run_skill_test.expectStdErrEqual("");
 
-    const run_process_test = b.addSystemCommand(&.{ "bun", "tests/process-success.js" });
-    run_process_test.addArtifactArg(executable);
-
-    const run_failure_process_test = b.addSystemCommand(&.{ "bun", "tests/process-failures.js" });
-    run_failure_process_test.addArtifactArg(executable);
-
-    const run_source_input_process_test = b.addSystemCommand(&.{ "bun", "tests/process-source-input.js" });
-    run_source_input_process_test.addArtifactArg(executable);
-
-    const run_store_hardening_test = b.addSystemCommand(&.{ "bun", "tests/process-store-hardening.js" });
-    run_store_hardening_test.addArtifactArg(executable);
-
-    const run_config_test = b.addSystemCommand(&.{ "bun", "tests/process-config.js" });
-    run_config_test.addArtifactArg(executable);
+    const integration_options = b.addOptions();
+    integration_options.addOptionPath("slm_path", executable.getEmittedBin());
+    const integration = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    integration.root_module.addOptions("integration_options", integration_options);
+    const run_integration = b.addRunArtifact(integration);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_skill_test.step);
-    test_step.dependOn(&run_process_test.step);
-    test_step.dependOn(&run_failure_process_test.step);
-    test_step.dependOn(&run_source_input_process_test.step);
-    test_step.dependOn(&run_store_hardening_test.step);
-    test_step.dependOn(&run_config_test.step);
+    test_step.dependOn(&run_integration.step);
 
     const updater = b.addExecutable(.{
         .name = "update-models",
