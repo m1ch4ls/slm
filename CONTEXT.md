@@ -28,6 +28,38 @@ _Avoid_: Stdout, API response, diagnostics
 The language model that processes an `slm` request and is expected to be cheaper and less capable than the agent's primary model.
 _Avoid_: Local model, parameter-count claims
 
+**Cheapest model**:
+The delegated language model with the lowest estimated token cost for a workload composed of 90% uncached input tokens and 10% output tokens, using the applicable published prices.
+_Avoid_: Lowest input price, cheapest provider
+
+**Provider**:
+The company operating an API through which a delegated language model is accessed.
+_Avoid_: Compatibility protocol, endpoint
+
+**Compatibility endpoint**:
+An endpoint that accepts requests and returns responses shaped according to the OpenAI Chat Completions protocol, regardless of its provider.
+_Avoid_: OpenAI provider
+
+**Explicit configuration**:
+A user-specified model and compatibility endpoint that bypass automatic selection.
+_Avoid_: OpenAI configuration, custom provider
+
+**Automatic selection**:
+Choosing the cheapest model among providers for which a non-empty provider credential is configured, without testing remote model access.
+_Avoid_: Provider autodetection, cheapest available
+
+**Model manifest**:
+The reviewed, committed dataset from which automatic selection obtains provider models, prices, and capacity limits.
+_Avoid_: Pricing table, catalog
+
+**Pricing table**:
+The human-readable documentation rendering of the model manifest.
+_Avoid_: Model manifest, source data
+
+**Catalog snapshot**:
+The models.dev dataset examined when regenerating the model manifest.
+_Avoid_: Model manifest, runtime catalog
+
 **Processing attempt**:
 An `slm` invocation with a valid task instruction that has begun consuming input, regardless of whether processing succeeds.
 _Avoid_: CLI run, request
