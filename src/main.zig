@@ -2,7 +2,10 @@ const std = @import("std");
 const build_options = @import("build_options");
 const attempt_store = @import("attempt_store.zig");
 const cli = @import("cli.zig");
+const config_module = @import("config.zig");
+const limits = @import("limits.zig");
 const model = @import("model.zig");
+const model_manifest = @import("model_manifest.zig");
 const openai = @import("openai.zig");
 const source_input = @import("source_input.zig");
 
@@ -13,11 +16,12 @@ pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
         switch (err) {
             error.InvalidArguments,
-            error.MissingEnvironmentVariable,
             error.MissingPrompt,
             error.ModelFailureReported,
             error.SourceFailureReported,
             error.InvalidTaskInstruction,
+            error.TaskInstructionTooLarge,
+            error.ConfigurationFailure,
             => {},
             else => writeStderr(init.io, "slm: {s}\n", .{@errorName(err)}) catch {},
         }
@@ -45,22 +49,50 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
-    const prompt = config.prompt orelse {
+    if (config.debug_config and args.len != 2) {
+        try writeStderr(init.io, "invalid arguments: --debug-config must be used alone\n", .{});
+        return error.InvalidArguments;
+    }
+
+    const prompt = if (config.debug_config) null else config.prompt orelse {
         try writeStderr(init.io, "missing required argument: <prompt>\n\n{s}", .{help});
         return error.MissingPrompt;
     };
-    if (!std.unicode.utf8ValidateSlice(prompt)) {
-        try writeStderr(init.io, "slm: task instruction is not valid UTF-8\n", .{});
-        return error.InvalidTaskInstruction;
+    if (prompt) |value| {
+        if (!std.unicode.utf8ValidateSlice(value)) {
+            try writeStderr(init.io, "slm: task instruction is not valid UTF-8\n", .{});
+            return error.InvalidTaskInstruction;
+        }
+        if (value.len > limits.task_instruction_byte_limit) {
+            try writeStderr(init.io, "slm: task instruction exceeds 16384 bytes\n", .{});
+            return error.TaskInstructionTooLarge;
+        }
     }
 
-    const base_url = config.base_url orelse
-        try envOrDefault(init, "OPENAI_BASE_URL", cli.default_base_url);
-    const model_id = config.model orelse
-        try envRequired(init, "OPENAI_MODEL");
-    const api_key = init.minimal.environ.getAlloc(init.arena.allocator(), "OPENAI_API_KEY") catch |err| switch (err) {
-        error.EnvironmentVariableMissing => null,
-        else => return err,
+    const environment = try readConfigEnvironment(init);
+    const resolved = cli_config: {
+        const value = config_module.resolve(config, environment) catch |err| {
+            if (config.debug_config) try writeInvalidDebugConfig(init.io, err) else try writeConfigurationError(init.io, err);
+            return error.ConfigurationFailure;
+        };
+        break :cli_config value;
+    };
+
+    if (config.debug_config) {
+        try writeDebugConfig(init.io, resolved);
+        return;
+    }
+
+    const Request = struct { base_url: []const u8, model_id: []const u8, api_key: ?[]const u8, provider: ?[]const u8 };
+    const request: Request = switch (resolved) {
+        .explicit => |value| .{ .base_url = value.base_url, .model_id = value.model, .api_key = value.api_key, .provider = @as(?[]const u8, null) },
+        .automatic => |value| automatic: {
+            if (config.max_tokens > value.entry.output_limit) {
+                try writeStderr(init.io, "slm: --max-tokens exceeds selected model output limit\n", .{});
+                return error.ConfigurationFailure;
+            }
+            break :automatic .{ .base_url = value.provider.baseUrl(), .model_id = value.entry.model, .api_key = @as(?[]const u8, value.api_key), .provider = @as(?[]const u8, value.provider.id()) };
+        },
     };
 
     const recording_enabled = try recordingEnabled(init);
@@ -84,9 +116,10 @@ fn run(init: std.process.Init) !void {
     const monotonic_start = std.Io.Clock.awake.now(init.io);
     var attempt: ?attempt_store.Attempt = if (store) |*value|
         try value.begin(.{
-            .task_instruction = prompt,
+            .task_instruction = prompt.?,
             .runtime_system_prompt = openai.system_prompt,
-            .model_id = model_id,
+            .provider = request.provider,
+            .model_id = request.model_id,
             .max_tokens = config.max_tokens,
         }, started_at_utc.?)
     else
@@ -136,10 +169,10 @@ fn run(init: std.process.Init) !void {
     }
 
     var result = try openai.complete(allocator, init.io, .{
-        .base_url = base_url,
-        .api_key = api_key,
-        .model = model_id,
-        .prompt = prompt,
+        .base_url = request.base_url,
+        .api_key = request.api_key,
+        .model = request.model_id,
+        .prompt = prompt.?,
         .input = captured.processable,
         .max_tokens = config.max_tokens,
     });
@@ -236,21 +269,78 @@ fn isSkillCommand(args: []const []const u8) bool {
     return args.len == 2 and std.mem.eql(u8, args[1], "skill");
 }
 
-fn envOrDefault(init: std.process.Init, name: []const u8, default: []const u8) ![]const u8 {
-    return init.minimal.environ.getAlloc(init.arena.allocator(), name) catch |err| switch (err) {
-        error.EnvironmentVariableMissing => default,
-        else => return err,
+fn readConfigEnvironment(init: std.process.Init) !config_module.Environment {
+    return .{
+        .slm_base_url = try envOptional(init, "SLM_BASE_URL"),
+        .slm_model = try envOptional(init, "SLM_MODEL"),
+        .slm_api_key = try envOptional(init, "SLM_API_KEY"),
+        .openai_api_key = try envOptional(init, "OPENAI_API_KEY"),
+        .gemini_api_key = try envOptional(init, "GEMINI_API_KEY"),
+        .anthropic_api_key = try envOptional(init, "ANTHROPIC_API_KEY"),
     };
 }
 
-fn envRequired(init: std.process.Init, name: []const u8) ![]const u8 {
-    return init.minimal.environ.getAlloc(init.arena.allocator(), name) catch |err| switch (err) {
-        error.EnvironmentVariableMissing => {
-            try writeStderr(init.io, "missing required environment variable: {s}\n", .{name});
-            return error.MissingEnvironmentVariable;
-        },
-        else => return err,
+fn writeConfigurationError(io: std.Io, err: config_module.ResolveError) !void {
+    const message = switch (err) {
+        error.IncompleteCliConfiguration => "--model and --base-url must be provided together",
+        error.IncompleteEnvironmentConfiguration => "SLM_MODEL and SLM_BASE_URL must be set together",
+        error.EmptyApiKey => "SLM_API_KEY must not be empty",
+        error.EmptyProviderCredential => "provider credential variables must not be empty",
+        error.NoProviderCredentials => "no provider credentials configured; set OPENAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY, or set SLM_MODEL and SLM_BASE_URL",
+        error.InvalidBaseUrl => "invalid compatibility base URL",
+        error.InvalidModel => "invalid model ID",
     };
+    try writeStderr(io, "slm: {s}\n", .{message});
+}
+
+fn writeInvalidDebugConfig(io: std.Io, err: config_module.ResolveError) !void {
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    try writer.interface.print("status: invalid\nerror: {s}\n", .{@errorName(err)});
+    try writer.interface.flush();
+}
+
+fn writeDebugConfig(io: std.Io, resolved: config_module.Resolved) !void {
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(io, &buffer);
+    switch (resolved) {
+        .explicit => |value| try writer.interface.print(
+            "status: valid\nmode: explicit\nprovider: unknown\nmodel: {s}\nbase_url: {s}\nauthentication: {s}\nselection: explicit environment\n",
+            .{ value.model, value.base_url, if (value.api_key != null) "SLM_API_KEY" else "none" },
+        ),
+        .automatic => |value| try writer.interface.print(
+            "status: valid\nmode: automatic\nprovider: {s}\nmodel: {s}\nbase_url: {s}\nauthentication: {s}\nselection: cheapest configured provider\n",
+            .{ value.provider.label(), value.entry.model, value.provider.baseUrl(), value.provider.credentialVariable() },
+        ),
+    }
+    if (resolved == .automatic) {
+        const value = resolved.automatic;
+        try writer.interface.writeAll("input_price: $");
+        try writePrice(&writer.interface, value.entry.input_price);
+        try writer.interface.writeAll(" / 1M tokens\noutput_price: $");
+        try writePrice(&writer.interface, value.entry.output_price);
+        try writer.interface.writeAll(" / 1M tokens\nestimated_cost: $");
+        try writePrice(&writer.interface, value.entry.score() / 10);
+        try writer.interface.print(" / 1M weighted tokens\ncatalog: models.dev\nmanifest_updated_at: {s}\n", .{model_manifest.updated_at});
+    }
+    try writer.interface.flush();
+}
+
+fn writePrice(writer: *std.Io.Writer, micro_usd: u64) !void {
+    const fraction = micro_usd % 1_000_000;
+    if (fraction == 0) return writer.print("{d}.00", .{micro_usd / 1_000_000});
+    var digits: usize = 6;
+    var trimmed = fraction;
+    while (digits > 2 and trimmed % 10 == 0) : (digits -= 1) trimmed /= 10;
+    try writer.print("{d}.", .{micro_usd / 1_000_000});
+    switch (digits) {
+        2 => try writer.print("{d:0>2}", .{trimmed}),
+        3 => try writer.print("{d:0>3}", .{trimmed}),
+        4 => try writer.print("{d:0>4}", .{trimmed}),
+        5 => try writer.print("{d:0>5}", .{trimmed}),
+        6 => try writer.print("{d:0>6}", .{trimmed}),
+        else => unreachable,
+    }
 }
 
 fn writeStderr(io: std.Io, comptime format: []const u8, args: anytype) !void {
@@ -269,18 +359,21 @@ const help =
     \\
     \\OPTIONS:
     \\    -h, --help              Show this help
-    \\    --model MODEL          Model ID (or OPENAI_MODEL)
-    \\    --base-url URL         API base URL (or OPENAI_BASE_URL)
-    \\                           Default: https://api.openai.com/v1
+    \\    --model MODEL          Explicit model ID (requires --base-url)
+    \\    --base-url URL         Explicit compatibility API root (requires --model)
     \\    --max-tokens N         Maximum generated tokens (default: 16384)
+    \\    --debug-config        Show resolved environment configuration
     \\
     \\COMMANDS:
     \\    skill                  Print the agent skill
     \\
     \\ENVIRONMENT:
-    \\    OPENAI_MODEL           Required unless --model is passed
-    \\    OPENAI_BASE_URL        OpenAI-compatible API base URL
-    \\    OPENAI_API_KEY         Optional bearer token
+    \\    SLM_MODEL              Explicit model ID (with SLM_BASE_URL)
+    \\    SLM_BASE_URL           Explicit compatibility API root
+    \\    SLM_API_KEY            Optional explicit endpoint bearer token
+    \\    OPENAI_API_KEY         OpenAI automatic-selection credential
+    \\    GEMINI_API_KEY         Google Gemini automatic-selection credential
+    \\    ANTHROPIC_API_KEY      Anthropic automatic-selection credential
     \\    SLM_STATE_DIR         Absolute Processing attempt store override
     \\    SLM_NO_RECORD=1       Disable Processing attempt recording
     \\
@@ -293,7 +386,10 @@ const help =
 test {
     _ = attempt_store;
     _ = cli;
+    _ = config_module;
+    _ = limits;
     _ = model;
+    _ = model_manifest;
     _ = openai;
     _ = source_input;
 }

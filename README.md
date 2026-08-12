@@ -60,9 +60,9 @@ billing prediction.
 <!-- BEGIN GENERATED MODEL TABLE -->
 | Provider | Model | Input / 1M tokens | Output / 1M tokens | Estimated weighted cost |
 | --- | --- | ---: | ---: | ---: |
-| OpenAI | `gpt-5-nano` | $0.05 | $0.40 | $0.085 |
-| Google Gemini | `gemini-2.5-flash-lite` | $0.10 | $0.40 | $0.13 |
-| Anthropic | `claude-haiku-4-5` | $1.00 | $5.00 | $1.40 |
+| OpenAI | `gpt-5-nano` | $0.050000 | $0.400000 | $0.085000 |
+| Google Gemini | `gemini-3.5-flash-lite` | $0.300000 | $2.500000 | $0.520000 |
+| Anthropic | `claude-haiku-4-5` | $1.000000 | $5.000000 | $1.400000 |
 <!-- END GENERATED MODEL TABLE -->
 
 The committed model manifest is generated from the MIT-licensed

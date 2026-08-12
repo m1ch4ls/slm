@@ -48,6 +48,7 @@ CLI newline normalization. Failure outcomes do not have `model-output.gz`.
   "request": {
     "task_instruction": "summarize",
     "runtime_system_prompt": "...",
+    "provider": "openai",
     "model_id": "model-name",
     "max_tokens": 16384,
     "processing_byte_limit": 16777216
@@ -62,6 +63,8 @@ CLI newline normalization. Failure outcomes do not have `model-output.gz`.
 
 Durations are unsigned monotonic nanoseconds. `started_at_utc` is an RFC 3339 UTC
 timestamp with millisecond precision. Byte counts are uncompressed byte lengths.
+`provider` is present for automatic selection and omitted for explicit configuration;
+endpoint and credential details are never recorded.
 
 `outcome.kind` is the discriminator and has one of these shapes:
 

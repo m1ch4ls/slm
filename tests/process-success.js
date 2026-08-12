@@ -46,9 +46,9 @@ const server = Bun.serve({
 
 try {
   const baseEnvironment = {
-    OPENAI_API_KEY: "secret-that-must-not-be-recorded",
-    OPENAI_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
-    OPENAI_MODEL: "fixture-model",
+    SLM_API_KEY: "secret-that-must-not-be-recorded",
+    SLM_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
+    SLM_MODEL: "fixture-model",
   };
 
   const firstSource = Buffer.from("first\nsecond\0", "utf8");
@@ -78,6 +78,7 @@ try {
     "fixture-model",
     "model ID",
   );
+  assertEqual(firstRecord.metadata.request.provider, undefined, "explicit provider omitted");
   assertEqual(
     firstRecord.metadata.request.max_tokens,
     77,
@@ -152,8 +153,8 @@ try {
 
   const serializedMetadata = JSON.stringify(firstRecord.metadata);
   for (const excluded of [
-    baseEnvironment.OPENAI_API_KEY,
-    baseEnvironment.OPENAI_BASE_URL,
+    baseEnvironment.SLM_API_KEY,
+    baseEnvironment.SLM_BASE_URL,
     "authorization",
   ]) {
     assert(

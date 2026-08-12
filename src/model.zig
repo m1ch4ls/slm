@@ -1,8 +1,9 @@
 const std = @import("std");
+const limits = @import("limits.zig");
 
 pub const schema_version: u32 = 1;
 pub const request_format_version: u32 = 1;
-pub const processing_byte_limit: u64 = 16 * 1024 * 1024;
+pub const processing_byte_limit = limits.processing_byte_limit;
 
 pub const Output = union(enum) {
     content: []u8,

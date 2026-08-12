@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const accept_model_update = b.option(bool, "accept-model-update", "Accept generated model manifest and README changes") orelse false;
 
     const executable = b.addExecutable(.{
         .name = "slm",
@@ -46,6 +47,9 @@ pub fn build(b: *std.Build) void {
     const run_store_hardening_test = b.addSystemCommand(&.{ "bun", "tests/process-store-hardening.js" });
     run_store_hardening_test.addArtifactArg(executable);
 
+    const run_config_test = b.addSystemCommand(&.{ "bun", "tests/process-config.js" });
+    run_config_test.addArtifactArg(executable);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_skill_test.step);
@@ -53,4 +57,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_failure_process_test.step);
     test_step.dependOn(&run_source_input_process_test.step);
     test_step.dependOn(&run_store_hardening_test.step);
+    test_step.dependOn(&run_config_test.step);
+
+    const updater = b.addExecutable(.{
+        .name = "update-models",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/update_models.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const run_updater = b.addRunArtifact(updater);
+    if (accept_model_update) run_updater.addArg("--accept");
+    const update_step = b.step("update-models", "Refresh the model manifest from models.dev");
+    update_step.dependOn(&run_updater.step);
 }

@@ -1,7 +1,7 @@
 const std = @import("std");
+const limits = @import("limits.zig");
 
-pub const default_base_url = "https://api.openai.com/v1";
-pub const default_max_tokens: u32 = 16_384;
+pub const default_max_tokens = limits.default_max_tokens;
 
 pub const Config = struct {
     prompt: ?[]const u8 = null,
@@ -9,6 +9,7 @@ pub const Config = struct {
     model: ?[]const u8 = null,
     max_tokens: u32 = default_max_tokens,
     show_help: bool = false,
+    debug_config: bool = false,
 };
 
 pub const ParseError = error{
@@ -28,6 +29,8 @@ pub fn parse(args: []const []const u8) ParseError!Config {
 
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             config.show_help = true;
+        } else if (std.mem.eql(u8, arg, "--debug-config")) {
+            config.debug_config = true;
         } else if (std.mem.eql(u8, arg, "--model")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;

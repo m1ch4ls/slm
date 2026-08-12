@@ -31,8 +31,8 @@ const server = Bun.serve({
 });
 
 const environment = {
-  OPENAI_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
-  OPENAI_MODEL: "fixture-model",
+  SLM_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
+  SLM_MODEL: "fixture-model",
   SLM_STATE_DIR: stateDirectory,
 };
 

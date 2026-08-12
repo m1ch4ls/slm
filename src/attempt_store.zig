@@ -19,6 +19,7 @@ pub const FailurePoint = enum {
 pub const RequestContext = struct {
     task_instruction: []const u8,
     runtime_system_prompt: []const u8,
+    provider: ?[]const u8,
     model_id: []const u8,
     max_tokens: u32,
 };
@@ -366,6 +367,7 @@ pub const Attempt = struct {
             .request = .{
                 .task_instruction = self.context.task_instruction,
                 .runtime_system_prompt = self.context.runtime_system_prompt,
+                .provider = self.context.provider,
                 .model_id = self.context.model_id,
                 .max_tokens = self.context.max_tokens,
                 .processing_byte_limit = model.processing_byte_limit,
@@ -531,6 +533,7 @@ test "completed attempts publish structured metadata and exact gzip payloads" {
     defer store.close();
 
     const context: RequestContext = .{
+        .provider = null,
         .task_instruction = "summarize exactly",
         .runtime_system_prompt = "system rules\n",
         .model_id = "test-model",
@@ -676,6 +679,7 @@ test "failed Source input capture publishes no attempt" {
     var store = try Store.open(allocator, io, .{ .state_dir = root_path });
     defer store.close();
     const context: RequestContext = .{
+        .provider = null,
         .task_instruction = "process",
         .runtime_system_prompt = "rules",
         .model_id = "test-model",

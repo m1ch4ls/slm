@@ -37,9 +37,9 @@ const server = Bun.serve({
 });
 
 const baseEnvironment = {
-  OPENAI_API_KEY: "secret-api-key",
-  OPENAI_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
-  OPENAI_MODEL: "fixture-model",
+  SLM_API_KEY: "secret-api-key",
+  SLM_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
+  SLM_MODEL: "fixture-model",
   SLM_STATE_DIR: stateDirectory,
 };
 
@@ -79,7 +79,7 @@ try {
   const networkSource = Buffer.from("network source");
   const network = await invoke(networkSource, {
     ...baseEnvironment,
-    OPENAI_BASE_URL: `http://127.0.0.1:${stoppedPort}/v1`,
+    SLM_BASE_URL: `http://127.0.0.1:${stoppedPort}/v1`,
   });
   assertFailureProcess(network, 7, "model request failed");
   const networkRecord = readFailureRecord(stateDirectory, 7);
@@ -95,8 +95,8 @@ try {
 
   const serialized = JSON.stringify(networkRecord.metadata);
   for (const excluded of [
-    baseEnvironment.OPENAI_API_KEY,
-    baseEnvironment.OPENAI_BASE_URL,
+    baseEnvironment.SLM_API_KEY,
+    baseEnvironment.SLM_BASE_URL,
     "authorization",
   ]) {
     assert(!serialized.includes(excluded), `metadata excludes ${excluded}`);
